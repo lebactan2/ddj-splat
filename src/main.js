@@ -11,7 +11,32 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CopyShader } from 'three/examples/jsm/shaders/CopyShader.js';
-import { BokehPass } from 'three/examples/jsm/postprocessing/BokehPass.js';
+import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
+import { AfterimageShader } from 'three/examples/jsm/shaders/AfterimageShader.js';
+
+// Patch AfterimageShader to support 'scale' for echoing down
+AfterimageShader.uniforms['scale'] = { value: 1.0 };
+AfterimageShader.fragmentShader = `
+uniform float damp;
+uniform float scale;
+uniform sampler2D tOld;
+uniform sampler2D tNew;
+varying vec2 vUv;
+vec4 when_gt( vec4 x, float y ) {
+    return max( sign( x - y ), 0.0 );
+}
+void main() {
+    vec2 centeredUv = vUv - 0.5;
+    vec2 scaledUv = centeredUv / scale + 0.5;
+    vec4 texelOld = texture2D( tOld, scaledUv );
+    vec4 texelNew = texture2D( tNew, vUv );
+    // mask out edges if scaled out of bounds
+    if (scaledUv.x < 0.0 || scaledUv.x > 1.0 || scaledUv.y < 0.0 || scaledUv.y > 1.0) texelOld = vec4(0.0);
+    texelOld *= damp * when_gt( texelOld, 0.01 );
+    gl_FragColor = max(texelNew, texelOld);
+}
+`;
+
 import { Lensflare, LensflareElement } from 'three/examples/jsm/objects/Lensflare.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { applyTransforms } from './cutup/transform.js';
@@ -36,21 +61,48 @@ window.makeViewer = makeViewer;
 
 let composer = null;
 let bokehPass = null;
+let radialBlurPass = null;
+let afterimagePass = null;
 let lensflareLight = null;
 
 let sceneA = null;
 let sceneB = null;
+let sceneC = null;
+let sceneD = null;
 let rawSceneA = null;
 let rawSceneB = null;
+let rawSceneC = null;
+let rawSceneD = null;
 let resultData = null;
+
+const hardwareLevel = navigator.hardwareConcurrency || 4;
+let targetChunks = hardwareLevel >= 8 ? 8 : (hardwareLevel >= 4 ? 6 : 4);
+let layoutMode = '2deck'; // '2deck' or '4deck'
+
+function detectHardwareProfile() {
+  const cores = navigator.hardwareConcurrency || 4;
+  let chunks = cores <= 4 ? 4 : 8;
+  console.log(`Detected CPU Cores: ${cores} -> Setting default chunks to: ${chunks}`);
+  // We actually set them via the UI inputs initially now.
+}
+detectHardwareProfile();
+
 let numChunksA = 0;
 let numChunksB = 0;
+let numChunksC = 0;
+let numChunksD = 0;
 let numRollChunksA = 0;
 let numRollChunksB = 0;
+let numRollChunksC = 0;
+let numRollChunksD = 0;
 let boundsA = { center: new THREE.Vector3(), maxDist: 5 };
 let boundsB = { center: new THREE.Vector3(), maxDist: 5 };
+let boundsC = { center: new THREE.Vector3(), maxDist: 5 };
+let boundsD = { center: new THREE.Vector3(), maxDist: 5 };
 let currentScalesA = new Float32Array(32).fill(0);
 let currentScalesB = new Float32Array(32).fill(0);
+let currentScalesC = new Float32Array(32).fill(0);
+let currentScalesD = new Float32Array(32).fill(0);
 
 let isCameraFramed = false;
 let updateInProgress = false;
@@ -59,10 +111,16 @@ let updatePending = false;
 // Play Animation state
 let isPlayingA = false;
 let isPlayingB = false;
+let isPlayingC = false;
+let isPlayingD = false;
 let playAngleA = 0;
 let playAngleB = 0;
+let playAngleC = 0;
+let playAngleD = 0;
 let frozenPlayAngleA = 0;
 let frozenPlayAngleB = 0;
+let frozenPlayAngleC = 0;
+let frozenPlayAngleD = 0;
 
 let loopActiveA = false;
 let loopStartA = 0;
@@ -74,18 +132,37 @@ let loopActiveB = false;
 let loopStartB = 0;
 let loopLengthB = 1;
 let isAutoLoopB = false;
-let autoLoopLengthB = 4; // 4 beats
+let autoLoopLengthB = 4;
+
+let loopActiveC = false;
+let loopStartC = 0;
+let loopLengthC = 1;
+let isAutoLoopC = false;
+let autoLoopLengthC = 4;
+
+let loopActiveD = false;
+let loopStartD = 0;
+let loopLengthD = 1;
+let isAutoLoopD = false;
+let autoLoopLengthD = 4;
+
 let animationFrameId = null;
 
 // Jog Wheel scratching state
 let jogAngleA = 0;
 let jogAngleB = 0;
+let jogAngleC = 0;
+let jogAngleD = 0;
 let isScratchingA = false;
 let isScratchingB = false;
+let isScratchingC = false;
+let isScratchingD = false;
 
 // Hot Cue presets (seeds)
 const hotCuesA = [42, 108, 256, 512, 1024, 2048, 4096, 8192];
 const hotCuesB = [77, 128, 320, 640, 1111, 2222, 5555, 9999];
+const hotCuesC = [11, 22, 33, 44, 55, 66, 77, 88];
+const hotCuesD = [99, 88, 77, 66, 55, 44, 33, 22];
 
 // Splash flash trigger
 let splashFactor = 1.0;
@@ -99,6 +176,14 @@ let fxActiveB = "none";
 let fxEngagedB = false;
 let beatIndexB = 4;
 
+let fxActiveC = "none";
+let fxEngagedC = false;
+let beatIndexC = 4;
+
+let fxActiveD = "none";
+let fxEngagedD = false;
+let beatIndexD = 4;
+
 let fxActiveM = "none";
 let fxEngagedM = false;
 let beatIndexM = 4;
@@ -106,38 +191,45 @@ let beatIndexM = 4;
 const beatDivisions = ["1/32", "1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8", "16", "32"];
 let lastRollStateA = false;
 let lastRollStateB = false;
+let lastRollStateC = false;
+let lastRollStateD = false;
 
 // ── Inject DDJ-400 UI ──────────────────────────────────
 const appDiv = document.querySelector('#app');
 appDiv.innerHTML = `
   <div id="strobe-overlay" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:white; pointer-events:none; z-index:999999; opacity:0; mix-blend-mode:difference;"></div>
   <div id="viewer-container"></div>
-  <div id="fps-counter" style="position:absolute; top:12px; left:12px; z-index:9999; color:#10b981; font-family:monospace; font-size:16px; font-weight:bold; text-shadow: 1px 1px 2px #000;">0 FPS</div>
   
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
   <div class="hud-panel panel-left" id="deck-a">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="load-btn" style="background:#f97316; margin:0;">LOAD SCENE A<input type="file" id="file-a" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
-      <div class="flex-col" style="gap:4px; align-items:flex-start;">
+      <label class="icon-btn" id="btn-load-a">⏏<input type="file" id="file-a" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
+      <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-a-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
-        <div class="flex-row" style="gap:4px; align-items:center;">
-          <span style="font-size:10px; font-weight:bold; color:#888;">MAX SPLATS: <span id="max-splats-val-a">250k</span></span>
-          <input type="range" id="max-splats-slider-a" min="250000" max="1000000" step="10000" value="250000" style="width:60px;cursor:pointer;">
+        <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
+          <div class="flex-row" style="gap:4px; align-items:center;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">SPL: <span id="max-splats-val-a">250k</span></span>
+            <input type="range" id="max-splats-slider-a" class="max-splats" min="250000" max="1000000" step="10000" value="250000" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+          </div>
+          <div class="flex-row" style="gap:4px; align-items:center;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">4</span></span>
+            <input type="range" id="chunks-slider-a" class="max-chunks" min="1" max="16" step="1" value="4" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+          </div>
         </div>
       </div>
     </div>
     
-    <div class="section-box flex-col">
+    <div class="section-box flex-col" style="margin-bottom:8px;">
       <div class="flex-between">
         <span class="section-title" style="margin:0;">LOOP</span>
         <div class="flex-row">
-          <button class="round-btn" id="loop-half-a">1/2X</button>
-          <button class="round-btn" id="loop-active-a">4 BEAT</button>
+          <button class="round-btn" id="loop-half-a">1/2</button>
+          <button class="round-btn" id="loop-active-a">4B</button>
           <button class="round-btn" id="loop-double-a">2X</button>
         </div>
       </div>
-      <div class="flex-between" style="margin-top:8px;">
-        <button class="round-btn sync" id="sync-a">BEAT SYNC</button>
+      <div class="flex-between" style="margin-top:4px;">
+        <button class="round-btn sync" id="sync-a">SYNC</button>
         <div class="flex-row">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-a" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
@@ -145,94 +237,74 @@ appDiv.innerHTML = `
       </div>
     </div>
 
-    <div class="jog-wheel" id="jog-a" style="margin: 12px auto;">
-      <div class="jog-inner"><div class="jog-needle"></div></div>
-    </div>
-
-    <!-- MIXER CONTROLS FOR CH 1 -->
-    <div class="section-box" style="display:flex; gap:12px;">
-      <div style="flex:1; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-        <div class="knob-cell"><span class="knob-label">TRIM</span><input type="range" min="0" max="100" value="50" class="knob ch-trim" data-ch="1" id="trim-a"></div>
-        <div class="knob-cell"><span class="knob-label">FILTER</span><input type="range" min="-100" max="100" value="0" class="knob ch-filter" data-ch="1" id="filter-a"></div>
-        <div class="knob-cell"><span class="knob-label">HI</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-hi" data-ch="1" id="eq-hi-a"></div>
-        <div class="knob-cell"><span class="knob-label">MID</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-mid" data-ch="1" id="eq-mid-a"></div>
-        <div class="knob-cell" style="grid-column: span 2;"><span class="knob-label">LOW</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-low" data-ch="1" id="eq-low-a"></div>
+    <!-- JOG WHEEL + SLIDERS -->
+    <div style="display:flex; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;">
+      <div class="jog-wheel" id="jog-a">
+        <div class="jog-inner"><div class="jog-needle"></div></div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:8px; align-items:center;">
-        <div class="tempo-wrapper"><input type="range" id="tempo-a" min="-100" max="100" value="0" class="tempo-slider"></div>
-        <div class="fader-wrapper"><input type="range" class="ch-fader" id="vol-a" min="0" max="100" value="80"></div>
-        <span class="knob-label">CH FADER</span>
+      <div class="flex-col" style="align-items:center; gap:2px;">
+        <div class="tempo-wrapper" style="height:70px; width:12px;"><input type="range" id="tempo-a" min="-100" max="100" value="0" class="tempo-slider"></div>
+        <span style="font-size:7px; font-weight:bold; color:#888; letter-spacing:0.5px;">TEMPO</span>
+      </div>
+      <div class="flex-col" style="align-items:center; gap:2px;">
+        <div class="fader-wrapper" style="height:70px; width:12px;"><input type="range" class="ch-fader" id="vol-a" min="0" max="100" value="80"></div>
+        <span style="font-size:7px; font-weight:bold; color:#888; letter-spacing:0.5px;">VOL</span>
       </div>
     </div>
 
-    <div class="flex-between" style="margin-bottom:12px; padding: 0 16px; gap: 8px;">
-      <button class="huge-round-btn cue" id="btn-cue-a">CUE</button>
-      <button class="huge-round-btn stop" id="btn-stop-a" style="background:#444; width:48px; height:48px; font-size:12px;">STOP</button>
-      <button class="huge-round-btn play" id="btn-play-a">PLAY</button>
+    <!-- MIXER KNOBS -->
+    <div class="section-box flex-row" style="align-items:center; justify-content:center; gap:6px; margin-bottom:8px; padding:6px;">
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">HI</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-hi" data-ch="1" id="eq-hi-a"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">MID</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-mid" data-ch="1" id="eq-mid-a"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">LOW</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-low" data-ch="1" id="eq-low-a"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">TRIM</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-trim" data-ch="1" id="trim-a"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">FLT</span><input type="range" min="-100" max="100" value="0" class="knob knob-small ch-filter" data-ch="1" id="filter-a"></div>
+    </div>
+
+    <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
+      <button class="huge-round-btn cue" id="btn-cue-a">C</button>
+      <button class="huge-round-btn stop" id="btn-stop-a" style="background:#444; font-size:16px;">⏹</button>
+      <button class="huge-round-btn play" id="btn-play-a">▶</button>
     </div>
 
     <div class="pads-grid" id="pads-a">
-      <button class="pad-btn" data-pad="0">1</button><button class="pad-btn" data-pad="1">2</button>
-      <button class="pad-btn" data-pad="2">3</button><button class="pad-btn" data-pad="3">4</button>
-      <button class="pad-btn" data-pad="4">5</button><button class="pad-btn" data-pad="5">6</button>
-      <button class="pad-btn" data-pad="6">7</button><button class="pad-btn" data-pad="7">8</button>
-    </div>
-
-    <!-- DECK A FX (inline at bottom of deck A) -->
-    <div class="section-box" style="margin-top:8px; margin-bottom:0; padding:8px;">
-      <span class="section-title" style="color:#f97316; margin-bottom:6px;">DECK A FX</span>
-      <div class="flex-row" style="gap:6px; flex-wrap:wrap;">
-        <select id="fx-select-a" class="fx-select-dropdown" style="font-size:9px; padding:2px; flex:1; min-width:70px;">
-          <option value="none">NONE</option>
-          <option value="delay">DELAY</option>
-          <option value="echo">ECHO</option>
-          <option value="reverb">REVERB</option>
-          <option value="filter">FILTER</option>
-          <option value="flanger">FLANGER</option>
-          <option value="phaser">PHASER</option>
-          <option value="pitch">PITCH</option>
-          <option value="roll">ROLL</option>
-          <option value="spiral">SPIRAL</option>
-          <option value="trans">TRANS</option>
-        </select>
-        <div class="flex-row" style="background:#000; padding:2px 4px; border-radius:4px; border:1px solid #333; gap:4px;">
-          <button id="btn-beat-prev-a" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&lt;</button>
-          <span id="beat-value-a" style="font-size:9px;color:#fff;font-weight:bold;">1/2</span>
-          <button id="btn-beat-next-a" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&gt;</button>
-        </div>
-        <div class="flex-row" style="gap:4px; align-items:center;">
-          <span style="font-size:8px;color:#666;">DEPTH</span>
-          <input type="range" min="0" max="100" value="50" class="knob" id="fx-depth-a" style="width:32px; height:32px;">
-        </div>
-        <button id="btn-fx-toggle-a" class="fx-toggle-btn" style="padding:4px 8px; font-size:9px;">ON</button>
-      </div>
+      <button class="pad-btn" data-pad="0">1/8</button><button class="pad-btn" data-pad="1">1/4</button>
+      <button class="pad-btn" data-pad="2">1/2</button><button class="pad-btn" data-pad="3">1</button>
+      <button class="pad-btn" data-pad="4">2</button><button class="pad-btn" data-pad="5">4</button>
+      <button class="pad-btn" data-pad="6">8</button><button class="pad-btn" data-pad="7">16</button>
     </div>
   </div>
 
   <!-- RIGHT PANEL: DECK B + CH 2 MIXER -->
   <div class="hud-panel panel-right" id="deck-b">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="load-btn" style="background:#f97316; margin:0;">LOAD SCENE B<input type="file" id="file-b" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
-      <div class="flex-col" style="gap:4px; align-items:flex-start;">
+      <label class="icon-btn" id="btn-load-b">⏏<input type="file" id="file-b" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
+      <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-b-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
-        <div class="flex-row" style="gap:4px; align-items:center;">
-          <span style="font-size:10px; font-weight:bold; color:#888;">MAX SPLATS: <span id="max-splats-val-b">250k</span></span>
-          <input type="range" id="max-splats-slider-b" min="250000" max="1000000" step="10000" value="250000" style="width:60px;cursor:pointer;">
+        <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
+          <div class="flex-row" style="gap:4px; align-items:center;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">SPL: <span id="max-splats-val-b">250k</span></span>
+            <input type="range" id="max-splats-slider-b" class="max-splats" min="250000" max="1000000" step="10000" value="250000" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+          </div>
+          <div class="flex-row" style="gap:4px; align-items:center;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">4</span></span>
+            <input type="range" id="chunks-slider-b" class="max-chunks" min="1" max="16" step="1" value="4" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+          </div>
         </div>
       </div>
     </div>
     
-    <div class="section-box flex-col">
+    <div class="section-box flex-col" style="margin-bottom:8px;">
       <div class="flex-between">
         <span class="section-title" style="margin:0;">LOOP</span>
         <div class="flex-row">
-          <button class="round-btn" id="loop-half-b">1/2X</button>
-          <button class="round-btn" id="loop-active-b">4 BEAT</button>
+          <button class="round-btn" id="loop-half-b">1/2</button>
+          <button class="round-btn" id="loop-active-b">4B</button>
           <button class="round-btn" id="loop-double-b">2X</button>
         </div>
       </div>
-      <div class="flex-between" style="margin-top:8px;">
-        <button class="round-btn sync" id="sync-b">BEAT SYNC</button>
+      <div class="flex-between" style="margin-top:4px;">
+        <button class="round-btn sync" id="sync-b">SYNC</button>
         <div class="flex-row">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-b" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
@@ -240,169 +312,157 @@ appDiv.innerHTML = `
       </div>
     </div>
 
-    <div class="jog-wheel" id="jog-b" style="margin: 12px auto; border-color:#221100;">
-      <div class="jog-inner"><div class="jog-needle" style="background:#f97316;"></div></div>
-    </div>
-
-    <!-- MIXER CONTROLS FOR CH 2 -->
-    <div class="section-box" style="display:flex; gap:12px;">
-      <div style="flex:1; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-        <div class="knob-cell"><span class="knob-label">TRIM</span><input type="range" min="0" max="100" value="50" class="knob ch-trim" data-ch="2" id="trim-b"></div>
-        <div class="knob-cell"><span class="knob-label">FILTER</span><input type="range" min="-100" max="100" value="0" class="knob ch-filter" data-ch="2" id="filter-b"></div>
-        <div class="knob-cell"><span class="knob-label">HI</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-hi" data-ch="2" id="eq-hi-b"></div>
-        <div class="knob-cell"><span class="knob-label">MID</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-mid" data-ch="2" id="eq-mid-b"></div>
-        <div class="knob-cell" style="grid-column: span 2;"><span class="knob-label">LOW</span><input type="range" min="0" max="100" value="50" class="knob ch-eq-low" data-ch="2" id="eq-low-b"></div>
+    <!-- JOG WHEEL + SLIDERS -->
+    <div style="display:flex; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;">
+      <div class="jog-wheel" id="jog-b" style="border-color:#221100;">
+        <div class="jog-inner"><div class="jog-needle" style="background:#f97316;"></div></div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:8px; align-items:center;">
-        <div class="tempo-wrapper"><input type="range" id="tempo-b" min="-100" max="100" value="0" class="tempo-slider"></div>
-        <div class="fader-wrapper"><input type="range" class="ch-fader" id="vol-b" min="0" max="100" value="100"></div>
-        <span class="knob-label">CH FADER</span>
+      <div class="flex-col" style="align-items:center; gap:2px;">
+        <div class="tempo-wrapper" style="height:70px; width:12px;"><input type="range" id="tempo-b" min="-100" max="100" value="0" class="tempo-slider"></div>
+        <span style="font-size:7px; font-weight:bold; color:#888; letter-spacing:0.5px;">TEMPO</span>
+      </div>
+      <div class="flex-col" style="align-items:center; gap:2px;">
+        <div class="fader-wrapper" style="height:70px; width:12px;"><input type="range" class="ch-fader" id="vol-b" min="0" max="100" value="100"></div>
+        <span style="font-size:7px; font-weight:bold; color:#888; letter-spacing:0.5px;">VOL</span>
       </div>
     </div>
 
-    <div class="flex-between" style="margin-bottom:12px; padding: 0 16px; gap: 8px;">
-      <button class="huge-round-btn cue" id="btn-cue-b">CUE</button>
-      <button class="huge-round-btn stop" id="btn-stop-b" style="background:#444; width:48px; height:48px; font-size:12px;">STOP</button>
-      <button class="huge-round-btn play" id="btn-play-b">PLAY</button>
+    <!-- MIXER KNOBS -->
+    <div class="section-box flex-row" style="align-items:center; justify-content:center; gap:6px; margin-bottom:8px; padding:6px;">
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">HI</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-hi" data-ch="2" id="eq-hi-b"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">MID</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-mid" data-ch="2" id="eq-mid-b"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">LOW</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-eq-low" data-ch="2" id="eq-low-b"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">TRIM</span><input type="range" min="0" max="100" value="50" class="knob knob-small ch-trim" data-ch="2" id="trim-b"></div>
+      <div class="knob-cell"><span class="knob-label" style="font-size:8px;">FLT</span><input type="range" min="-100" max="100" value="0" class="knob knob-small ch-filter" data-ch="2" id="filter-b"></div>
+    </div>
+
+    <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
+      <button class="huge-round-btn cue" id="btn-cue-b">C</button>
+      <button class="huge-round-btn stop" id="btn-stop-b" style="background:#444; font-size:16px;">⏹</button>
+      <button class="huge-round-btn play" id="btn-play-b">▶</button>
     </div>
 
     <div class="pads-grid" id="pads-b">
-      <button class="pad-btn" data-pad="0">1</button><button class="pad-btn" data-pad="1">2</button>
-      <button class="pad-btn" data-pad="2">3</button><button class="pad-btn" data-pad="3">4</button>
-      <button class="pad-btn" data-pad="4">5</button><button class="pad-btn" data-pad="5">6</button>
-      <button class="pad-btn" data-pad="6">7</button><button class="pad-btn" data-pad="7">8</button>
-    </div>
-
-    <!-- DECK B FX (inline at bottom of deck B) -->
-    <div class="section-box" style="margin-top:8px; margin-bottom:0; padding:8px;">
-      <span class="section-title" style="color:#f97316; margin-bottom:6px;">DECK B FX</span>
-      <div class="flex-row" style="gap:6px; flex-wrap:wrap;">
-        <select id="fx-select-b" class="fx-select-dropdown" style="font-size:9px; padding:2px; flex:1; min-width:70px;">
-          <option value="none">NONE</option>
-          <option value="delay">DELAY</option>
-          <option value="echo">ECHO</option>
-          <option value="reverb">REVERB</option>
-          <option value="filter">FILTER</option>
-          <option value="flanger">FLANGER</option>
-          <option value="phaser">PHASER</option>
-          <option value="pitch">PITCH</option>
-          <option value="roll">ROLL</option>
-          <option value="spiral">SPIRAL</option>
-          <option value="trans">TRANS</option>
-        </select>
-        <div class="flex-row" style="background:#000; padding:2px 4px; border-radius:4px; border:1px solid #333; gap:4px;">
-          <button id="btn-beat-prev-b" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&lt;</button>
-          <span id="beat-value-b" style="font-size:9px;color:#fff;font-weight:bold;">1/2</span>
-          <button id="btn-beat-next-b" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&gt;</button>
-        </div>
-        <div class="flex-row" style="gap:4px; align-items:center;">
-          <span style="font-size:8px;color:#666;">DEPTH</span>
-          <input type="range" min="0" max="100" value="50" class="knob" id="fx-depth-b" style="width:32px; height:32px;">
-        </div>
-        <button id="btn-fx-toggle-b" class="fx-toggle-btn" style="padding:4px 8px; font-size:9px;">ON</button>
-      </div>
+      <button class="pad-btn" data-pad="0">1/8</button><button class="pad-btn" data-pad="1">1/4</button>
+      <button class="pad-btn" data-pad="2">1/2</button><button class="pad-btn" data-pad="3">1</button>
+      <button class="pad-btn" data-pad="4">2</button><button class="pad-btn" data-pad="5">4</button>
+      <button class="pad-btn" data-pad="6">8</button><button class="pad-btn" data-pad="7">16</button>
     </div>
   </div>
 
-  <!-- TOP PANEL: MASTER MIXER -->
-  <div class="hud-panel panel-top">
-    <div class="master-section">
-      <div class="knob-cell" style="flex-direction:row; gap:8px;">
-        <span class="knob-label">MASTER</span>
-        <input type="range" min="0" max="100" value="80" class="knob" id="master-vol">
-      </div>
-      <div class="crossfader-container">
-        <span class="section-title" style="display:block; text-align:center;">CROSSFADER</span>
-        <input type="range" min="0" max="100" value="50" class="crossfader-slider" id="crossfader">
-      </div>
-      <div class="vu-meters">
-        <div class="vu-bar"><div class="vu-active" id="vu-l"></div></div>
-        <div class="vu-bar"><div class="vu-active" id="vu-r"></div></div>
-      </div>
+  <!-- TOP PANEL: SETTINGS & UTILS -->
+  <div class="hud-panel panel-top" style="justify-content: flex-start; gap: 24px;">
+    <div class="flex-row" style="gap:12px;">
+      <div id="fps-counter" style="color:#10b981; font-family:monospace; font-size:14px; font-weight:bold; white-space:nowrap; min-width:60px;">0 FPS</div>
+      <div id="status" style="color:#10b981; font-family:monospace; font-size:11px; font-weight:bold; max-width:180px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">Ready</div>
     </div>
-  </div>
-
-  <!-- BOTTOM PANEL: MASTER FX & UTILS -->
-  <div class="hud-panel panel-bottom">
-    <!-- Settings (Left Column) -->
-    <div class="flex-col" style="justify-self: start; gap:6px; align-items: flex-start;">
-      <div class="flex-row">
-        <span style="font-size:10px; font-weight:bold; color:#888;">UI OPACITY</span>
-        <input type="range" id="ui-opacity" min="10" max="100" value="100" style="width:70px;cursor:pointer;">
-      </div>
+    
+    <button id="btn-layout-toggle" class="util-btn" style="background:#10b981; margin:0;">LAYOUT: 2 DECKS</button>
+    
+    <div class="flex-row" style="gap:16px;">
       <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-        <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG (IMAGES)
+        <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG
       </label>
-      
-      <div class="flex-row" style="gap:16px; align-items: flex-end; margin-top:2px;">
-        <div class="flex-col" style="gap:4px;">
-          <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="checkbox" id="chk-use-colab"> USE COLAB GPU
-          </label>
-          <input type="text" id="colab-url" placeholder="Paste loca.lt URL here..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:110px; box-sizing:border-box;">
-        </div>
-        
-        <div class="flex-row" style="gap:12px;">
-          <div class="knob-cell">
-            <span class="knob-label">DOF</span>
-            <input type="range" min="0" max="100" value="0" class="knob" id="knob-dof">
-          </div>
-          <div class="knob-cell">
-            <span class="knob-label">FLARE</span>
-            <input type="range" min="0" max="100" value="0" class="knob" id="knob-lensflare">
-          </div>
-          <div class="knob-cell" style="align-items:flex-start;">
-            <span class="knob-label" style="margin-bottom:2px;">HDRI</span>
-            <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer; width:80px;">
-              <option value="none">NONE</option>
-              <option value="sunset">SUNSET</option>
-              <option value="studio">STUDIO</option>
-              <option value="night">NIGHT CITY</option>
-              <option value="forest">FOREST</option>
-              <option value="custom-url">CUSTOM URL...</option>
-              <option value="local-file">UPLOAD FILE...</option>
-            </select>
-          </div>
-        </div>
+      <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
+        <input type="checkbox" id="chk-use-colab"> COLAB
+      </label>
+      <input type="text" id="colab-url" placeholder="loca.lt URL..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:100px; box-sizing:border-box;">
+    </div>
+    
+    <div class="flex-row" style="gap:12px; margin-left:auto;">
+      <div class="knob-cell" style="flex-direction:row;">
+        <span class="knob-label">DOF</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-dof">
+      </div>
+      <div class="knob-cell" style="flex-direction:row;">
+        <span class="knob-label">FLARE</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-lensflare">
+      </div>
+      <div class="flex-row" style="align-items:center;">
+        <span class="knob-label" style="margin-right:4px;">HDRI</span>
+        <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer;">
+          <option value="none">NONE</option><option value="sunset">SUNSET</option><option value="studio">STUDIO</option>
+          <option value="night">NIGHT</option><option value="forest">FOREST</option>
+          <option value="custom-url">URL...</option><option value="local-file">FILE...</option>
+        </select>
       </div>
     </div>
 
-    <!-- MASTER FX (Middle Column) -->
-    <div class="flex-col" style="justify-self: center; align-items:center; gap:4px; padding:4px; border:1px solid rgba(255,255,255,0.05); border-radius:6px; background:rgba(0,0,0,0.15);">
-      <span style="font-size:9px; font-weight:bold; color:#f97316;">MASTER FX</span>
-      <div class="flex-row" style="gap:6px;">
-        <select id="fx-select-m" class="fx-select-dropdown" style="font-size:9px; padding:2px;">
-          <option value="none">NONE</option>
-          <option value="delay">DELAY</option>
-          <option value="echo">ECHO</option>
-          <option value="reverb">REVERB</option>
-          <option value="filter">FILTER</option>
-          <option value="flanger">FLANGER</option>
-          <option value="phaser">PHASER</option>
-          <option value="pitch">PITCH</option>
-          <option value="roll">ROLL</option>
-          <option value="spiral">SPIRAL</option>
-          <option value="trans">TRANS</option>
+    <div class="flex-row" style="gap:8px; border-left:1px solid rgba(255,255,255,0.1); padding-left:16px;">
+      <button id="btn-reset" class="util-btn">RESET</button>
+      <button id="btn-export" class="util-btn">EXPORT</button>
+      <button id="btn-collapse" class="util-btn" style="background:#333;">HIDE UI</button>
+    </div>
+  </div>
+
+  <!-- BOTTOM PANEL: FX & CROSSFADER -->
+  <div class="hud-panel panel-bottom">
+    
+    <!-- Left Column: Deck A & C FX -->
+    <div id="fx-decks-left" class="flex-col" style="justify-self:start; gap: 8px; width: 100%;">
+      <!-- DECK A FX -->
+      <div id="fx-box-a" class="flex-row" style="align-items:center; gap:12px; padding:4px; border:1px solid rgba(255,255,255,0.05); border-radius:6px; background:rgba(0,0,0,0.15);">
+        <button id="btn-fx-toggle-a" class="fx-name-toggle">DECK A FX</button>
+        <select id="fx-select-a" class="fx-select-dropdown" style="font-size:9px; padding:2px; width:70px;">
+          <option value="none">NONE</option><option value="delay">DELAY</option><option value="echo">ECHO</option>
+          <option value="reverb">REVERB</option><option value="filter">FILTER</option><option value="flanger">FLANGER</option>
+          <option value="phaser">PHASER</option><option value="pitch">PITCH</option><option value="roll">ROLL</option>
+          <option value="spiral">SPIRAL</option><option value="trans">TRANS</option>
+        </select>
+        <div class="flex-row" style="background:#000; padding:2px; border-radius:4px; border:1px solid #333; gap:4px;">
+          <button id="btn-beat-prev-a" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&lt;</button>
+          <span id="beat-value-a" style="font-size:9px;color:#fff;font-weight:bold;">1/2</span>
+          <button id="btn-beat-next-a" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&gt;</button>
+        </div>
+        <input type="range" min="0" max="100" value="50" class="knob knob-small" id="fx-depth-a">
+      </div>
+    </div>
+
+    <!-- Center Column: Master FX & Crossfader -->
+    <div class="flex-col" style="justify-self:center; align-items:center; gap:8px;">
+      <div class="flex-row" style="align-items:center; gap:12px; padding:4px; border:1px solid rgba(255,255,255,0.05); border-radius:6px; background:rgba(0,0,0,0.15);">
+        <button id="btn-fx-toggle-m" class="fx-name-toggle">MASTER FX</button>
+        <select id="fx-select-m" class="fx-select-dropdown" style="font-size:9px; padding:2px; width:70px;">
+          <option value="none">NONE</option><option value="delay">DELAY</option><option value="echo">ECHO</option>
+          <option value="reverb">REVERB</option><option value="filter">FILTER</option><option value="flanger">FLANGER</option>
+          <option value="phaser">PHASER</option><option value="pitch">PITCH</option><option value="roll">ROLL</option>
+          <option value="spiral">SPIRAL</option><option value="trans">TRANS</option>
         </select>
         <div class="flex-row" style="background:#000; padding:2px; border-radius:4px; border:1px solid #333; gap:4px;">
           <button id="btn-beat-prev-m" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&lt;</button>
           <span id="beat-value-m" style="font-size:9px;color:#fff;font-weight:bold;">1/2</span>
           <button id="btn-beat-next-m" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&gt;</button>
         </div>
-        <input type="range" min="0" max="100" value="50" class="knob" id="fx-depth-m" style="width:32px; height:32px;">
-        <button id="btn-fx-toggle-m" class="fx-toggle-btn" style="padding:4px 8px; font-size:9px; border-radius:4px; border-width:1px;">ON</button>
+        <input type="range" min="0" max="100" value="50" class="knob knob-small" id="fx-depth-m">
+      </div>
+      
+      <div class="flex-row" style="gap:12px; align-items:center; justify-content:center; width: 100%;">
+        <input type="range" min="0" max="100" value="50" class="crossfader-slider" id="crossfader" style="width:200px; height:16px;">
+        <div class="flex-row" style="gap:4px;">
+          <span style="font-size:9px; font-weight:bold; color:#888;">MST VOL</span>
+          <input type="range" min="0" max="100" value="80" class="knob knob-small" id="master-vol">
+        </div>
       </div>
     </div>
     
-    <!-- UTILS (Right Column) -->
-    <div class="util-section" style="justify-self: end; display:flex; flex-direction:column; align-items:flex-end;">
-      <div class="flex-row">
-        <button id="btn-reset" class="util-btn">RESET</button>
-        <button id="btn-export" class="util-btn">EXPORT PLY</button>
-        <button id="btn-collapse" class="util-btn" style="background:#333;">HIDE UI</button>
+    <!-- Right Column: Deck B & D FX -->
+    <div id="fx-decks-right" class="flex-col" style="justify-self:end; gap: 8px; width: 100%;">
+      <!-- DECK B FX -->
+      <div id="fx-box-b" class="flex-row" style="align-items:center; gap:12px; padding:4px; border:1px solid rgba(255,255,255,0.05); border-radius:6px; background:rgba(0,0,0,0.15);">
+        <button id="btn-fx-toggle-b" class="fx-name-toggle">DECK B FX</button>
+        <select id="fx-select-b" class="fx-select-dropdown" style="font-size:9px; padding:2px; width:70px;">
+          <option value="none">NONE</option><option value="delay">DELAY</option><option value="echo">ECHO</option>
+          <option value="reverb">REVERB</option><option value="filter">FILTER</option><option value="flanger">FLANGER</option>
+          <option value="phaser">PHASER</option><option value="pitch">PITCH</option><option value="roll">ROLL</option>
+          <option value="spiral">SPIRAL</option><option value="trans">TRANS</option>
+        </select>
+        <div class="flex-row" style="background:#000; padding:2px; border-radius:4px; border:1px solid #333; gap:4px;">
+          <button id="btn-beat-prev-b" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&lt;</button>
+          <span id="beat-value-b" style="font-size:9px;color:#fff;font-weight:bold;">1/2</span>
+          <button id="btn-beat-next-b" style="background:transparent;border:none;color:#aaa;cursor:pointer;font-size:9px;padding:0 2px;">&gt;</button>
+        </div>
+        <input type="range" min="0" max="100" value="50" class="knob knob-small" id="fx-depth-b">
       </div>
-      <div id="status">HUD System Ready</div>
     </div>
+
   </div>
 
   <!-- HIDDEN TEST INPUTS -->
@@ -431,6 +491,76 @@ appDiv.innerHTML = `
   <button id="btn-show-controller" class="collapse-tab hidden">SHOW HUD</button>
 `;
 
+// Duplicate Decks for 4-deck layout mode
+const deckAEl = document.getElementById('deck-a');
+const deckBEl = document.getElementById('deck-b');
+const fxBoxAEl = document.getElementById('fx-box-a');
+const fxBoxBEl = document.getElementById('fx-box-b');
+
+const deckCHtml = deckAEl.outerHTML
+  .replace(/id="deck-a"/g, 'id="deck-c"')
+  .replace(/-a"/g, '-c"')
+  .replace(/-a /g, '-c ')
+  .replace(/-a'/g, "-c'")
+  .replace(/Deck A/gi, 'Deck C')
+  .replace(/SCENE A/gi, 'SCENE C')
+  .replace(/data-ch="1"/g, 'data-ch="3"')
+  .replace(/panel-left/, 'panel-bottom-left');
+
+const deckDHtml = deckBEl.outerHTML
+  .replace(/id="deck-b"/g, 'id="deck-d"')
+  .replace(/-b"/g, '-d"')
+  .replace(/-b /g, '-d ')
+  .replace(/-b'/g, "-d'")
+  .replace(/Deck B/gi, 'Deck D')
+  .replace(/SCENE B/gi, 'SCENE D')
+  .replace(/data-ch="2"/g, 'data-ch="4"')
+  .replace(/panel-right/, 'panel-bottom-right');
+
+appDiv.insertAdjacentHTML('beforeend', deckCHtml + deckDHtml);
+
+const fxCHtml = fxBoxAEl.outerHTML
+  .replace(/id="fx-box-a"/g, 'id="fx-box-c"')
+  .replace(/id="btn-fx-toggle-a"/g, 'id="btn-fx-toggle-c"')
+  .replace(/id="fx-select-a"/g, 'id="fx-select-c"')
+  .replace(/id="btn-beat-prev-a"/g, 'id="btn-beat-prev-c"')
+  .replace(/id="beat-value-a"/g, 'id="beat-value-c"')
+  .replace(/id="btn-beat-next-a"/g, 'id="btn-beat-next-c"')
+  .replace(/id="fx-depth-a"/g, 'id="fx-depth-c"')
+  .replace(/DECK A/gi, 'DECK C')
+  .replace(/id="fx-box-c"/, 'id="fx-box-c" style="display:none;"');
+document.getElementById('fx-decks-left').insertAdjacentHTML('beforeend', fxCHtml);
+
+const fxDHtml = fxBoxBEl.outerHTML
+  .replace(/id="fx-box-b"/g, 'id="fx-box-d"')
+  .replace(/id="btn-fx-toggle-b"/g, 'id="btn-fx-toggle-d"')
+  .replace(/id="fx-select-b"/g, 'id="fx-select-d"')
+  .replace(/id="btn-beat-prev-b"/g, 'id="btn-beat-prev-d"')
+  .replace(/id="beat-value-b"/g, 'id="beat-value-d"')
+  .replace(/id="btn-beat-next-b"/g, 'id="btn-beat-next-d"')
+  .replace(/id="fx-depth-b"/g, 'id="fx-depth-d"')
+  .replace(/DECK B/gi, 'DECK D')
+  .replace(/id="fx-box-d"/, 'id="fx-box-d" style="display:none;"');
+document.getElementById('fx-decks-right').insertAdjacentHTML('beforeend', fxDHtml);
+
+// Layout Toggle Logic
+const btnLayoutToggle = document.getElementById('btn-layout-toggle');
+btnLayoutToggle.addEventListener('click', () => {
+  if (layoutMode === '2deck') {
+    layoutMode = '4deck';
+    document.body.classList.add('layout-4deck');
+    btnLayoutToggle.textContent = 'LAYOUT: 4 DECKS';
+    document.getElementById('fx-box-c').style.display = 'flex';
+    document.getElementById('fx-box-d').style.display = 'flex';
+  } else {
+    layoutMode = '2deck';
+    document.body.classList.remove('layout-4deck');
+    btnLayoutToggle.textContent = 'LAYOUT: 2 DECKS';
+    document.getElementById('fx-box-c').style.display = 'none';
+    document.getElementById('fx-box-d').style.display = 'none';
+  }
+});
+
 const fileInputA = document.querySelector('#file-a');
 const fileInputB = document.querySelector('#file-b');
 const fileAName = document.querySelector('#file-a-name');
@@ -456,12 +586,44 @@ const btnBeatPrevB = document.querySelector('#btn-beat-prev-b');
 const btnBeatNextB = document.querySelector('#btn-beat-next-b');
 const beatValueBEl = document.querySelector('#beat-value-b');
 
+const fileInputC = document.querySelector('#file-c');
+const fileInputD = document.querySelector('#file-d');
+const fileCName = document.querySelector('#file-c-name');
+const fileDName = document.querySelector('#file-d-name');
+
+const fxSelectC = document.querySelector('#fx-select-c');
+const fxDepthC = document.querySelector('#fx-depth-c');
+const btnFxToggleC = document.querySelector('#btn-fx-toggle-c');
+const btnBeatPrevC = document.querySelector('#btn-beat-prev-c');
+const btnBeatNextC = document.querySelector('#btn-beat-next-c');
+const beatValueCEl = document.querySelector('#beat-value-c');
+
+const fxSelectD = document.querySelector('#fx-select-d');
+const fxDepthD = document.querySelector('#fx-depth-d');
+const btnFxToggleD = document.querySelector('#btn-fx-toggle-d');
+const btnBeatPrevD = document.querySelector('#btn-beat-prev-d');
+const btnBeatNextD = document.querySelector('#btn-beat-next-d');
+const beatValueDEl = document.querySelector('#beat-value-d');
+
 const fxSelectM = document.querySelector('#fx-select-m');
 const fxDepthM = document.querySelector('#fx-depth-m');
 const btnFxToggleM = document.querySelector('#btn-fx-toggle-m');
 const btnBeatPrevM = document.querySelector('#btn-beat-prev-m');
 const btnBeatNextM = document.querySelector('#btn-beat-next-m');
 const beatValueMEl = document.querySelector('#beat-value-m');
+
+// Cached hot-loop element references (avoid per-frame DOM queries)
+const volAEl = document.querySelector('#vol-a');
+const volBEl = document.querySelector('#vol-b');
+const tempoCEl = document.querySelector('#tempo-c');
+const tempoDEl = document.querySelector('#tempo-d');
+
+// Reusable scratch math objects (avoid per-frame allocations)
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _scratchEuler = new THREE.Euler();
+const _scratchQRandom = new THREE.Quaternion();
+const _scratchQ = new THREE.Quaternion();
+const _scratchV = new THREE.Vector3();
 
 const chkMove = document.querySelector('#chk-move');
 const chkRotate = document.querySelector('#chk-rotate');
@@ -497,7 +659,6 @@ const fxButtons = [
 const btnCollapse = document.querySelector('#btn-collapse');
 const btnShowController = document.querySelector('#btn-show-controller');
 const hudPanels = document.querySelectorAll('.hud-panel');
-const uiOpacity = document.querySelector('#ui-opacity');
 const chkRemoveBg = document.getElementById('chk-remove-bg');
 if (chkRemoveBg) {
   chkRemoveBg.addEventListener('change', () => {
@@ -514,13 +675,6 @@ document.getElementById('chk-lensflare')?.addEventListener('change', (e) => {
   triggerRealtimeUpdate();
 });
 
-if (uiOpacity) {
-  uiOpacity.addEventListener('input', () => {
-    hudPanels.forEach(panel => {
-      panel.style.opacity = uiOpacity.value / 100;
-    });
-  });
-}
 
 if (btnCollapse) {
   btnCollapse.addEventListener('click', () => {
@@ -794,82 +948,56 @@ crossfader.addEventListener('input', () => {
 });
 
 // ── Deck A FX Event Listeners ──
-btnBeatPrevA.addEventListener('click', () => {
-  if (beatIndexA > 0) {
-    beatIndexA--;
-    beatValueAEl.textContent = beatDivisions[beatIndexA];
-    triggerRealtimeUpdate();
-  }
-});
-btnBeatNextA.addEventListener('click', () => {
-  if (beatIndexA < beatDivisions.length - 1) {
-    beatIndexA++;
-    beatValueAEl.textContent = beatDivisions[beatIndexA];
-    triggerRealtimeUpdate();
-  }
-});
+btnBeatPrevA.addEventListener('click', () => { if (beatIndexA > 0) { beatIndexA--; beatValueAEl.textContent = beatDivisions[beatIndexA]; triggerRealtimeUpdate(); } });
+btnBeatNextA.addEventListener('click', () => { if (beatIndexA < beatDivisions.length - 1) { beatIndexA++; beatValueAEl.textContent = beatDivisions[beatIndexA]; triggerRealtimeUpdate(); } });
 btnFxToggleA.addEventListener('click', async () => {
   if (!sceneA) { statusEl.textContent = 'Load a splat scene first!'; return; }
   fxEngagedA = !fxEngagedA;
-  if (fxEngagedA) {
-    btnFxToggleA.classList.add('active');
-    fxActiveA = fxSelectA.value;
-    startAnimationLoop();
-  } else {
-    btnFxToggleA.classList.remove('active');
-    fxActiveA = "none";
-    stopAnimationLoop();
-  }
+  if (fxEngagedA) { btnFxToggleA.classList.add('active'); fxActiveA = fxSelectA.value; startAnimationLoop(); } else { btnFxToggleA.classList.remove('active'); fxActiveA = "none"; stopAnimationLoop(); }
   await rebuildViewerBuffers();
   statusEl.textContent = 'FX Ready';
 });
-fxSelectA.addEventListener('change', async () => {
-  if (fxEngagedA) {
-    fxActiveA = fxSelectA.value;
-    await rebuildViewerBuffers();
-  }
-});
+fxSelectA.addEventListener('change', async () => { if (fxEngagedA) { fxActiveA = fxSelectA.value; await rebuildViewerBuffers(); } });
 fxDepthA.addEventListener('input', () => { updateKnobFill(fxDepthA); });
-fxDepthA.addEventListener('change', async () => { if (fxEngagedA) await rebuildViewerBuffers(); });
 
 // ── Deck B FX Event Listeners ──
-btnBeatPrevB.addEventListener('click', () => {
-  if (beatIndexB > 0) {
-    beatIndexB--;
-    beatValueBEl.textContent = beatDivisions[beatIndexB];
-    triggerRealtimeUpdate();
-  }
-});
-btnBeatNextB.addEventListener('click', () => {
-  if (beatIndexB < beatDivisions.length - 1) {
-    beatIndexB++;
-    beatValueBEl.textContent = beatDivisions[beatIndexB];
-    triggerRealtimeUpdate();
-  }
-});
+btnBeatPrevB.addEventListener('click', () => { if (beatIndexB > 0) { beatIndexB--; beatValueBEl.textContent = beatDivisions[beatIndexB]; triggerRealtimeUpdate(); } });
+btnBeatNextB.addEventListener('click', () => { if (beatIndexB < beatDivisions.length - 1) { beatIndexB++; beatValueBEl.textContent = beatDivisions[beatIndexB]; triggerRealtimeUpdate(); } });
 btnFxToggleB.addEventListener('click', async () => {
-  if (!sceneA) { statusEl.textContent = 'Load a splat scene first!'; return; }
+  if (!sceneB) { statusEl.textContent = 'Load a splat scene first!'; return; }
   fxEngagedB = !fxEngagedB;
-  if (fxEngagedB) {
-    btnFxToggleB.classList.add('active');
-    fxActiveB = fxSelectB.value;
-    startAnimationLoop();
-  } else {
-    btnFxToggleB.classList.remove('active');
-    fxActiveB = "none";
-    stopAnimationLoop();
-  }
+  if (fxEngagedB) { btnFxToggleB.classList.add('active'); fxActiveB = fxSelectB.value; startAnimationLoop(); } else { btnFxToggleB.classList.remove('active'); fxActiveB = "none"; stopAnimationLoop(); }
   await rebuildViewerBuffers();
   statusEl.textContent = 'FX Ready';
 });
-fxSelectB.addEventListener('change', async () => {
-  if (fxEngagedB) {
-    fxActiveB = fxSelectB.value;
-    await rebuildViewerBuffers();
-  }
-});
+fxSelectB.addEventListener('change', async () => { if (fxEngagedB) { fxActiveB = fxSelectB.value; await rebuildViewerBuffers(); } });
 fxDepthB.addEventListener('input', () => { updateKnobFill(fxDepthB); });
-fxDepthB.addEventListener('change', async () => { if (fxEngagedB) await rebuildViewerBuffers(); });
+
+// ── Deck C FX Event Listeners ──
+btnBeatPrevC.addEventListener('click', () => { if (beatIndexC > 0) { beatIndexC--; beatValueCEl.textContent = beatDivisions[beatIndexC]; triggerRealtimeUpdate(); } });
+btnBeatNextC.addEventListener('click', () => { if (beatIndexC < beatDivisions.length - 1) { beatIndexC++; beatValueCEl.textContent = beatDivisions[beatIndexC]; triggerRealtimeUpdate(); } });
+btnFxToggleC.addEventListener('click', async () => {
+  if (!sceneC) { statusEl.textContent = 'Load a splat scene first!'; return; }
+  fxEngagedC = !fxEngagedC;
+  if (fxEngagedC) { btnFxToggleC.classList.add('active'); fxActiveC = fxSelectC.value; startAnimationLoop(); } else { btnFxToggleC.classList.remove('active'); fxActiveC = "none"; stopAnimationLoop(); }
+  await rebuildViewerBuffers();
+  statusEl.textContent = 'FX Ready';
+});
+fxSelectC.addEventListener('change', async () => { if (fxEngagedC) { fxActiveC = fxSelectC.value; await rebuildViewerBuffers(); } });
+fxDepthC.addEventListener('input', () => { updateKnobFill(fxDepthC); });
+
+// ── Deck D FX Event Listeners ──
+btnBeatPrevD.addEventListener('click', () => { if (beatIndexD > 0) { beatIndexD--; beatValueDEl.textContent = beatDivisions[beatIndexD]; triggerRealtimeUpdate(); } });
+btnBeatNextD.addEventListener('click', () => { if (beatIndexD < beatDivisions.length - 1) { beatIndexD++; beatValueDEl.textContent = beatDivisions[beatIndexD]; triggerRealtimeUpdate(); } });
+btnFxToggleD.addEventListener('click', async () => {
+  if (!sceneD) { statusEl.textContent = 'Load a splat scene first!'; return; }
+  fxEngagedD = !fxEngagedD;
+  if (fxEngagedD) { btnFxToggleD.classList.add('active'); fxActiveD = fxSelectD.value; startAnimationLoop(); } else { btnFxToggleD.classList.remove('active'); fxActiveD = "none"; stopAnimationLoop(); }
+  await rebuildViewerBuffers();
+  statusEl.textContent = 'FX Ready';
+});
+fxSelectD.addEventListener('change', async () => { if (fxEngagedD) { fxActiveD = fxSelectD.value; await rebuildViewerBuffers(); } });
+fxDepthD.addEventListener('input', () => { updateKnobFill(fxDepthD); });
 
 // ── Master FX Event Listeners ──
 btnBeatPrevM.addEventListener('click', () => {
@@ -1306,15 +1434,18 @@ function stopAnimationLoop() {
       animationFrameId = null;
     }
     
-    document.querySelector('#vu-l').style.height = '0%';
-    document.querySelector('#vu-r').style.height = '0%';
+    const vuReset = document.querySelector('#vu-l');
+    const vuResetR = document.querySelector('#vu-r');
+    if (vuReset) vuReset.style.height = '0%';
+    if (vuResetR) vuResetR.style.height = '0%';
   }
 }
 
 function updateVuMeters() {
   const vuL = document.querySelector('#vu-l');
   const vuR = document.querySelector('#vu-r');
-  
+  if (!vuL || !vuR) return;
+
   let hL = 0;
   let hR = 0;
   
@@ -1350,7 +1481,8 @@ async function makeViewer() {
     'rootElement': currentWrapper,
     'sharedMemoryForWorkers': false,
     'dynamicScene': true,
-    'antialiased': false
+    'antialiased': false,
+    'halfPrecisionCovariancesOnGPU': true
   });
   window.viewer = viewer;
   viewer.start();
@@ -1364,7 +1496,8 @@ function centerCamera() {
   
   const fov = viewer.camera.fov || 65;
   const targetDist = 5.0;
-  const distance = (targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2);
+  // 2x zoom-out: persistent framing distance for load, play, and stop alike
+  const distance = ((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 2.0;
 
   viewer.camera.position.set(0, 0, distance);
   if (viewer.controls && viewer.controls.target) {
@@ -1488,13 +1621,15 @@ function processFx(scene, deckStr) {
   
   let currentScene = copySplatData(scene);
   
-  const chNum = deckStr === 'deckA' ? 1 : 2;
+  const chNum = (deckStr === 'deckA' || deckStr === 'deckC') ? 1 : 2;
   const settings = getChSettings(chNum);
   applyMixerSettings(currentScene, settings);
   
-  const engagedDeck = deckStr === 'deckA' ? fxEngagedA : fxEngagedB;
-  const activeFxDeck = deckStr === 'deckA' ? fxActiveA : fxActiveB;
-  const depthDeck = deckStr === 'deckA' ? fxDepthA : fxDepthB;
+  let engagedDeck, activeFxDeck, depthDeck;
+  if (deckStr === 'deckA') { engagedDeck = fxEngagedA; activeFxDeck = fxActiveA; depthDeck = fxDepthA; }
+  else if (deckStr === 'deckB') { engagedDeck = fxEngagedB; activeFxDeck = fxActiveB; depthDeck = fxDepthB; }
+  else if (deckStr === 'deckC') { engagedDeck = fxEngagedC; activeFxDeck = fxActiveC; depthDeck = fxDepthC; }
+  else if (deckStr === 'deckD') { engagedDeck = fxEngagedD; activeFxDeck = fxActiveD; depthDeck = fxDepthD; }
   
   if (engagedDeck && activeFxDeck !== "none") {
     const amount = Number(depthDeck.value) / 100;
@@ -1626,9 +1761,6 @@ function setupPostProcessingAndLensFlare() {
     const lensflare = new Lensflare();
     lensflare.addElement(new LensflareElement(mainTex, 450, 0.0));
     lensflare.addElement(new LensflareElement(ringTex, 400, 0.2));
-    lensflare.addElement(new LensflareElement(hexTex1, 90, 0.5));
-    lensflare.addElement(new LensflareElement(hexTex2, 120, 0.75));
-    lensflare.addElement(new LensflareElement(hexTex3, 60, 0.9));
     lensflare.addElement(new LensflareElement(hexTex1, 140, 1.0));
 
     lensflareLight.add(lensflare);
@@ -1680,24 +1812,58 @@ function setupPostProcessingAndLensFlare() {
 
   composer.addPass(renderPass);
 
-  bokehPass = new BokehPass(viewer.threeScene, viewer.camera, {
-    focus: 4.5,
-    aperture: 0.0005,
-    maxblur: 0.005,
-    width: width,
-    height: height
-  });
+  afterimagePass = new AfterimagePass();
+  afterimagePass.enabled = false;
+  afterimagePass.uniforms['damp'].value = 0.96;
+  afterimagePass.uniforms['scale'].value = 1.0;
+  composer.addPass(afterimagePass);
 
-  // Start with DOF disabled - user toggles via checkbox
-  const chkDof = document.getElementById('chk-dof');
-  bokehPass.enabled = chkDof ? chkDof.checked : false;
-  bokehPass.renderToScreen = false;
+  const RadialBlurShader = {
+    uniforms: {
+      "tDiffuse": { value: null },
+      "amount": { value: 0.0 }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D tDiffuse;
+      uniform float amount;
+      varying vec2 vUv;
+      void main() {
+        vec2 center = vec2(0.5, 0.5);
+        vec2 dir = vUv - center;
+        float dist = length(dir);
+        dir = normalize(dir);
+        
+        vec4 color = texture2D(tDiffuse, vUv);
+        
+        if (amount > 0.001) {
+          float samples = 12.0;
+          float blurStart = 0.2;
+          float blurFactor = smoothstep(blurStart, 0.8, dist) * amount * 0.03;
+          
+          if (blurFactor > 0.001) {
+            vec4 sum = vec4(0.0);
+            for(float i = -6.0; i <= 6.0; i++) {
+              sum += texture2D(tDiffuse, vUv + dir * (i * blurFactor / samples));
+            }
+            color = sum / 13.0;
+          }
+        }
+        
+        gl_FragColor = color;
+      }
+    `
+  };
 
-  if (!bokehPass.setSize) {
-    bokehPass.setSize = function() {};
-  }
-
-  composer.addPass(bokehPass);
+  radialBlurPass = new ShaderPass(RadialBlurShader);
+  radialBlurPass.enabled = true;
+  composer.addPass(radialBlurPass);
 
   // Final pass: copy the last buffer to screen
   const copyPass = new ShaderPass(CopyShader);
@@ -1736,12 +1902,16 @@ async function rebuildViewerBuffers() {
     const options = [];
     numChunksA = 0;
     numChunksB = 0;
+    numChunksC = 0;
+    numChunksD = 0;
     numRollChunksA = 0;
     numRollChunksB = 0;
+    numRollChunksC = 0;
+    numRollChunksD = 0;
 
     if (sceneA) {
       const fxSceneA = processFx(sceneA, 'deckA');
-      const chunksA = sliceIntoSpheres(fxSceneA, 16);
+      const chunksA = sliceIntoSpheres(fxSceneA, Number(document.querySelector('#chunks-slider-a').value) || 4);
       for (const c of chunksA) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -1761,7 +1931,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneB) {
       const fxSceneB = processFx(sceneB, 'deckB');
-      const chunksB = sliceIntoSpheres(fxSceneB, 16);
+      const chunksB = sliceIntoSpheres(fxSceneB, Number(document.querySelector('#chunks-slider-b').value) || 4);
       for (const c of chunksB) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -1775,6 +1945,32 @@ async function rebuildViewerBuffers() {
         for (let j = 0; j < 4; j++) {
           const buf = convertSplatDataToBuffer(chunksB[0]);
           if (buf) { buffers.push(buf); options.push({ 'splatAlphaRemovalThreshold': 5 }); numRollChunksB++; }
+        }
+      }
+    }
+
+    if (sceneC) {
+      const fxSceneC = processFx(sceneC, 'deckC');
+      const chunksC = sliceIntoSpheres(fxSceneC, Number(document.querySelector('#chunks-slider-c')?.value) || 4);
+      for (const c of chunksC) {
+        const buf = convertSplatDataToBuffer(c);
+        if (buf) {
+          buffers.push(buf);
+          options.push({ 'splatAlphaRemovalThreshold': 5 });
+          numChunksC++;
+        }
+      }
+    }
+
+    if (sceneD) {
+      const fxSceneD = processFx(sceneD, 'deckD');
+      const chunksD = sliceIntoSpheres(fxSceneD, Number(document.querySelector('#chunks-slider-d')?.value) || 4);
+      for (const c of chunksD) {
+        const buf = convertSplatDataToBuffer(c);
+        if (buf) {
+          buffers.push(buf);
+          options.push({ 'splatAlphaRemovalThreshold': 5 });
+          numChunksD++;
         }
       }
     }
@@ -1833,6 +2029,7 @@ async function rebuildViewerBuffers() {
           
           uniform float uStrobeAlphaA;
           uniform float uStrobeAlphaB;
+
           uniform float uDofFocus;
           uniform float uDofAmount;
           varying float vOpacityMult;
@@ -1933,11 +2130,8 @@ async function rebuildViewerBuffers() {
           
           vec4 viewCenter = transformModelViewMatrix * vec4(displacedCenter, 1.0);
           
-          // Apply Vertex-based Depth of Field
-          float dist = -viewCenter.z;
-          float coc = abs(dist - uDofFocus) * uDofAmount;
-          float dofScale = 1.0 + coc * 8.0;
-          vOpacityMult *= 1.0 / (1.0 + coc * coc * 12.0);
+          // Vertex-based Depth of Field disabled (moved to post-processing)
+          float dofScale = 1.0;
           `
         );
         
@@ -1988,7 +2182,10 @@ async function rebuildViewerBuffers() {
           ` + fragShader;
           fragShader = fragShader.replace(
             'gl_FragColor = vec4(vColor.rgb, w);',
-            'gl_FragColor = vec4(vColor.rgb, w * vOpacityMult);'
+            `
+            if (vOpacityMult < 0.001) discard;
+            gl_FragColor = vec4(vColor.rgb, w * vOpacityMult);
+            `
           );
           fragShader = fragShader.replace(
             'gl_FragColor = vec4(color.rgb, opacity);',
@@ -2106,88 +2303,7 @@ async function loadFileToSplatData(file) {
   throw new Error('Unsupported format');
 }
 
-// ── File input handlers ────────────────────────────────
-fileInputA.addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  if (fileAName) fileAName.textContent = file.name;
-  
-  if (file.name.toLowerCase().match(/\.(png|jpg|jpeg)$/)) {
-    statusEl.textContent = `Converting ${file.name} to 3D Model... This may take ~10 seconds.`;
-  } else {
-    statusEl.textContent = `Loading ${file.name}...`;
-  }
-
-  try {
-    rawSceneA = await loadFileToSplatData(file);
-    
-    // Dynamically update slider range for Deck A
-    const sliderA = document.getElementById('max-splats-slider-a');
-    if (sliderA) {
-      sliderA.min = Math.min(250000, rawSceneA.splatCount);
-      sliderA.max = rawSceneA.splatCount;
-      sliderA.value = rawSceneA.splatCount;
-      const valAEl = document.getElementById('max-splats-val-a');
-      if (valAEl) {
-        valAEl.textContent = rawSceneA.splatCount >= 1000000 ? (rawSceneA.splatCount/1000000).toFixed(1) + 'M' : Math.floor(rawSceneA.splatCount/1000) + 'k';
-      }
-    }
-
-    sceneA = limitSplatCount(rawSceneA, rawSceneA.splatCount);
-    
-    resultData = null;
-    isCameraFramed = false;
-    
-    statusEl.textContent = `Scene A loaded: ${sceneA.splatCount.toLocaleString()} splats. Rendering...`;
-    
-    await rebuildViewerBuffers();
-    statusEl.textContent = `Scene A active: ${sceneA.splatCount.toLocaleString()} splats`;
-  } catch (err) {
-    console.error(err);
-    statusEl.textContent = `Error loading Scene A: ${err.message}`;
-  }
-});
-
-fileInputB.addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  if (fileBName) fileBName.textContent = file.name;
-
-  if (file.name.toLowerCase().match(/\.(png|jpg|jpeg)$/)) {
-    statusEl.textContent = `Converting ${file.name} to 3D Model... This may take ~10 seconds.`;
-  } else {
-    statusEl.textContent = `Loading ${file.name}...`;
-  }
-
-  try {
-    rawSceneB = await loadFileToSplatData(file);
-
-    // Dynamically update slider range for Deck B
-    const sliderB = document.getElementById('max-splats-slider-b');
-    if (sliderB) {
-      sliderB.min = Math.min(250000, rawSceneB.splatCount);
-      sliderB.max = rawSceneB.splatCount;
-      sliderB.value = rawSceneB.splatCount;
-      const valBEl = document.getElementById('max-splats-val-b');
-      if (valBEl) {
-        valBEl.textContent = rawSceneB.splatCount >= 1000000 ? (rawSceneB.splatCount/1000000).toFixed(1) + 'M' : Math.floor(rawSceneB.splatCount/1000) + 'k';
-      }
-    }
-
-    sceneB = limitSplatCount(rawSceneB, rawSceneB.splatCount);
-
-    statusEl.textContent = `Scene B loaded: ${sceneB.splatCount.toLocaleString()} splats. Rendering...`;
-    
-    await rebuildViewerBuffers();
-    statusEl.textContent = `Scene B active: ${sceneB.splatCount.toLocaleString()} splats. Ready to crossfade!`;
-    triggerRealtimeUpdate();
-  } catch (err) {
-    console.error(err);
-    statusEl.textContent = `Error loading Scene B: ${err.message}`;
-  }
-});
+// Old handlers removed.
 
 // ── Drag & Drop files directly to Decks ────────────────
 function setupDragAndDrop(elementId, fileInput) {
@@ -2349,24 +2465,37 @@ function rotateSplatPositions(splatData, angle) {
   }
 }
 
-document.getElementById('max-splats-slider-a')?.addEventListener('input', (e) => {
-  const val = parseInt(e.target.value);
-  document.getElementById('max-splats-val-a').textContent = val >= 1000000 ? (val/1000000).toFixed(1) + 'M' : Math.floor(val/1000) + 'k';
-});
-document.getElementById('max-splats-slider-b')?.addEventListener('input', (e) => {
-  const val = parseInt(e.target.value);
-  document.getElementById('max-splats-val-b').textContent = val >= 1000000 ? (val/1000000).toFixed(1) + 'M' : Math.floor(val/1000) + 'k';
-});
-
-document.getElementById('max-splats-slider-a')?.addEventListener('change', async (e) => {
-  if (rawSceneA) {
-    sceneA = limitSplatCount(rawSceneA, parseInt(e.target.value));
-    await rebuildViewerBuffers();
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id && e.target.id.startsWith('max-splats-slider-')) {
+    const deck = e.target.id.split('-').pop();
+    const valEl = document.getElementById(`max-splats-val-${deck}`);
+    const val = parseInt(e.target.value);
+    if (valEl) valEl.textContent = val >= 1000000 ? (val/1000000).toFixed(1) + 'M' : Math.floor(val/1000) + 'k';
+    const min = parseFloat(e.target.min), max = parseFloat(e.target.max);
+    const pct = ((val - min) / (max - min) * 100).toFixed(1) + '%';
+    e.target.style.background = `linear-gradient(to right, #f97316 0%, #f97316 ${pct}, #2a2a2a ${pct}, #2a2a2a 100%)`;
+  }
+  if (e.target && e.target.id && e.target.id.startsWith('chunks-slider-')) {
+    const deck = e.target.id.split('-').pop();
+    const valEl = document.getElementById(`chunks-val-${deck}`);
+    if (valEl) valEl.textContent = e.target.value;
+    const min = parseFloat(e.target.min), max = parseFloat(e.target.max);
+    const pct = ((parseFloat(e.target.value) - min) / (max - min) * 100).toFixed(1) + '%';
+    e.target.style.background = `linear-gradient(to right, #f97316 0%, #f97316 ${pct}, #2a2a2a ${pct}, #2a2a2a 100%)`;
   }
 });
-document.getElementById('max-splats-slider-b')?.addEventListener('change', async (e) => {
-  if (rawSceneB) {
-    sceneB = limitSplatCount(rawSceneB, parseInt(e.target.value));
+
+document.addEventListener('change', async (e) => {
+  if (e.target && e.target.id && e.target.id.startsWith('max-splats-slider-')) {
+    const deck = e.target.id.split('-').pop();
+    const val = parseInt(e.target.value);
+    if (deck === 'a' && rawSceneA) sceneA = limitSplatCount(rawSceneA, val);
+    if (deck === 'b' && rawSceneB) sceneB = limitSplatCount(rawSceneB, val);
+    if (deck === 'c' && rawSceneC) sceneC = limitSplatCount(rawSceneC, val);
+    if (deck === 'd' && rawSceneD) sceneD = limitSplatCount(rawSceneD, val);
+    await rebuildViewerBuffers();
+  }
+  if (e.target && e.target.id && e.target.id.startsWith('chunks-slider-')) {
     await rebuildViewerBuffers();
   }
 });
@@ -2410,7 +2539,6 @@ async function performRealtimeUpdate() {
     return;
   }
   
-  console.time('performRealtimeUpdate');
   try {
     const cuts = parseInt(cutsSlider.value);
     const mixAmount = Number(crossfader.value) / 100;
@@ -2440,6 +2568,11 @@ async function performRealtimeUpdate() {
     const amountB = Number(fxDepthB.value) / 100;
     const amountM = Number(fxDepthM.value) / 100;
 
+    const dofVal = Number(knobDof.value) / 100;
+    if (radialBlurPass) {
+      radialBlurPass.uniforms['amount'].value = dofVal;
+    }
+
     if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uFxTime) {
       const uniforms = viewer.splatMesh.material.uniforms;
       uniforms.uFxTime.value = (performance.now() % 100000) * 0.002;
@@ -2447,11 +2580,11 @@ async function performRealtimeUpdate() {
       
       uniforms.uFaderScaleA = uniforms.uFaderScaleA || { value: 1.0 };
       uniforms.uFaderScaleB = uniforms.uFaderScaleB || { value: 1.0 };
-      uniforms.uFaderScaleA.value = Number(document.querySelector('#vol-a').value) / 100;
-      uniforms.uFaderScaleB.value = Number(document.querySelector('#vol-b').value) / 100;
-      
+      uniforms.uFaderScaleA.value = Number(volAEl.value) / 100;
+      uniforms.uFaderScaleB.value = Number(volBEl.value) / 100;
+
       if (uniforms.uDofAmount) {
-        uniforms.uDofAmount.value = Number(document.getElementById('knob-dof').value) / 100;
+        uniforms.uDofAmount.value = dofVal;
       }
       if (uniforms.uDofFocus && viewer.camera) {
         const focusDist = viewer.camera.position.distanceTo((viewer.controls && viewer.controls.target) ? viewer.controls.target : new THREE.Vector3());
@@ -2577,48 +2710,84 @@ async function performRealtimeUpdate() {
       viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB;
     }
     
-    // Background sequencer strobe (strips around edges)
+    // Background sequencer strobe (rectangle sequencer with gradients)
     if (!document.getElementById('seq-t')) {
-      const seqStyle = "position:absolute; background:white; opacity:0; pointer-events:none; z-index:10; box-shadow:0 0 80px 40px white; transition:opacity 0.05s ease-out; mix-blend-mode:screen;";
+      const seqStyle = "position:absolute; opacity:0; pointer-events:none; z-index:10; transition:opacity 0.05s ease-out;";
       const createBlock = (id, props) => {
         const el = document.createElement('div');
-        el.id = id;
-        el.style.cssText = seqStyle + props;
+        el.id = id; el.style.cssText = seqStyle + props;
         const parent = document.getElementById('viewer-container') || document.body;
         parent.appendChild(el);
       };
-      createBlock('seq-t', 'top:0; left:0; width:100vw; height:3vh;');
-      createBlock('seq-r', 'top:0; right:0; width:3vh; height:100vh;');
-      createBlock('seq-b', 'bottom:0; left:0; width:100vw; height:3vh;');
-      createBlock('seq-l', 'top:0; left:0; width:3vh; height:100vh;');
+      createBlock('seq-t', "top:0; left:0; width:100vw; height:200px; background: linear-gradient(to bottom, rgba(255,255,255,1), transparent);");
+      createBlock('seq-r', "top:0; right:0; width:200px; height:100vh; background: linear-gradient(to left, rgba(255,255,255,1), transparent);");
+      createBlock('seq-b', "bottom:0; left:0; width:100vw; height:200px; background: linear-gradient(to top, rgba(255,255,255,1), transparent);");
+      createBlock('seq-l', "top:0; left:0; width:200px; height:100vh; background: linear-gradient(to right, rgba(255,255,255,1), transparent);");
     }
 
     const anyTransActive = isTransA || isTransB;
     if (anyTransActive) {
-      const globalSeqPhase = Math.floor((Date.now() * 0.001 * transFreq)) % 4; // Freq same as beats
+      const globalSeqPhase = Math.floor((Date.now() * 0.001 * transFreq * 2)) % 4; // Freq x2 for sequencer
       const overallTransAmount = Math.max(
         (fxEngagedA && fxActiveA === 'trans') ? amountA : 0,
         (fxEngagedB && fxActiveB === 'trans') ? amountB : 0,
         (fxEngagedM && fxActiveM === 'trans') ? amountM : 0
       );
       
-      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
-      seqBlocks.forEach((id, idx) => {
+      const seqs = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+      seqs.forEach((id, idx) => {
         const el = document.getElementById(id);
         if (el) {
-          if (idx === globalSeqPhase && isTransOn) { // Strobe on beat
-            el.style.opacity = overallTransAmount * 0.95;
+          if (idx === globalSeqPhase) {
+            el.style.opacity = overallTransAmount * 0.9;
           } else {
             el.style.opacity = 0;
           }
         }
       });
     } else {
-      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
-      seqBlocks.forEach(id => {
+      ['seq-t', 'seq-r', 'seq-b', 'seq-l'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.opacity = 0;
       });
+    }
+
+    // Process Delay/Echo with 2D Feedback Post-processing
+    if (afterimagePass) {
+      const isDelayA = (fxEngagedA && fxActiveA === 'delay');
+      const isDelayB = (fxEngagedB && fxActiveB === 'delay');
+      const isDelayC = (fxEngagedC && fxActiveC === 'delay');
+      const isDelayD = (fxEngagedD && fxActiveD === 'delay');
+      const isDelayM = (fxEngagedM && fxActiveM === 'delay');
+      
+      const isEchoA = (fxEngagedA && fxActiveA === 'echo');
+      const isEchoB = (fxEngagedB && fxActiveB === 'echo');
+      const isEchoC = (fxEngagedC && fxActiveC === 'echo');
+      const isEchoD = (fxEngagedD && fxActiveD === 'echo');
+      const isEchoM = (fxEngagedM && fxActiveM === 'echo');
+
+      const anyEchoOrDelay = isDelayA || isDelayB || isDelayC || isDelayD || isDelayM || isEchoA || isEchoB || isEchoC || isEchoD || isEchoM;
+      if (anyEchoOrDelay) {
+        afterimagePass.enabled = true;
+        
+        // Find max effect amount
+        const maxAmount = Math.max(
+          isDelayA || isEchoA ? amountA : 0,
+          isDelayB || isEchoB ? amountB : 0,
+          isDelayC || isEchoC ? amountC : 0,
+          isDelayD || isEchoD ? amountD : 0,
+          isDelayM || isEchoM ? amountM : 0
+        );
+
+        // Map amount to damp (0.8 to 0.998) - increased for longer feedback
+        afterimagePass.uniforms['damp'].value = 0.8 + maxAmount * 0.198;
+        
+        // Map amount to scale down (1.0 to 1.05) if echo
+        const isAnyEcho = isEchoA || isEchoB || isEchoC || isEchoD || isEchoM;
+        afterimagePass.uniforms['scale'].value = isAnyEcho ? 1.0 + maxAmount * 0.05 : 1.0;
+      } else {
+        afterimagePass.enabled = false;
+      }
     }
 
     const strobeOverlayEl = document.getElementById('strobe-overlay');
@@ -2633,6 +2802,7 @@ async function performRealtimeUpdate() {
     // Apply fast GPU transforms and visibility to Scene A
     const totalChunksA = numChunksA + numRollChunksA;
     for (let i = 0; i < totalChunksA; i++) {
+      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
 
@@ -2673,13 +2843,14 @@ async function performRealtimeUpdate() {
       }
       
       const angleA = effectiveAngleA + jogAngleA;
-      const qRandomA = new THREE.Quaternion().setFromEuler(new THREE.Euler(rX, rY, rZ));
-      const qA = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angleA).multiply(qRandomA);
-      const posA = boundsA.center.clone().multiplyScalar(finalScale).applyQuaternion(qA).negate();
+      _scratchEuler.set(rX, rY, rZ);
+      _scratchQRandom.setFromEuler(_scratchEuler);
+      _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
+      _scratchV.copy(boundsA.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(finalScale);
-      splatScene.quaternion.copy(qA);
-      splatScene.position.copy(posA);
+      splatScene.quaternion.copy(_scratchQ);
+      splatScene.position.copy(_scratchV);
     }
 
     // Apply fast GPU transforms and visibility to Scene B
@@ -2725,20 +2896,85 @@ async function performRealtimeUpdate() {
       }
 
       const angleB = effectiveAngleB + jogAngleB;
-      const qRandomB = new THREE.Quaternion().setFromEuler(new THREE.Euler(rX, rY, rZ));
-      const qB = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angleB).multiply(qRandomB);
-      const posB = boundsB.center.clone().multiplyScalar(finalScale).applyQuaternion(qB).negate();
+      _scratchEuler.set(rX, rY, rZ);
+      _scratchQRandom.setFromEuler(_scratchEuler);
+      _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
+      _scratchV.copy(boundsB.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(finalScale);
-      splatScene.quaternion.copy(qB);
-      splatScene.position.copy(posB);
+      splatScene.quaternion.copy(_scratchQ);
+      splatScene.position.copy(_scratchV);
+    }
+    
+    // Apply fast GPU transforms and visibility to Scene C
+    const totalChunksC = numChunksC + numRollChunksC;
+    for (let i = 0; i < totalChunksC; i++) {
+      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
+      const splatScene = viewer.getSplatScene(sceneIdx++);
+      if (!splatScene) continue;
+
+      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
+      
+      let targetVisible = false;
+      let targetScaleFactor = 0;
+      let rX = 0, rY = 0, rZ = globalZ;
+      
+      if (isPlayingC) {
+        targetVisible = true;
+        targetScaleFactor = 1.0;
+        playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
+      }
+
+      currentScalesC[i] += (targetScaleFactor - currentScalesC[i]) * 0.15;
+      splatScene.visible = isPlayingC ? targetVisible : (currentScalesC[i] > 0.01);
+
+      const scaleC = targetDist / boundsC.maxDist;
+      const activeScale = Math.max(0.0001, currentScalesC[i] * scaleC);
+
+      _scratchQ.setFromAxisAngle(_yAxis, playAngleC);
+      _scratchV.copy(boundsC.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
+
+      splatScene.scale.setScalar(activeScale);
+      splatScene.quaternion.copy(_scratchQ);
+      splatScene.position.copy(_scratchV);
+    }
+
+    // Apply fast GPU transforms and visibility to Scene D
+    const totalChunksD = numChunksD + numRollChunksD;
+    for (let i = 0; i < totalChunksD; i++) {
+      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
+      const splatScene = viewer.getSplatScene(sceneIdx++);
+      if (!splatScene) continue;
+
+      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
+      
+      let targetVisible = false;
+      let targetScaleFactor = 0;
+      let rX = 0, rY = 0, rZ = globalZ;
+      
+      if (isPlayingD) {
+        targetVisible = true;
+        targetScaleFactor = 1.0;
+        playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
+      }
+
+      currentScalesD[i] += (targetScaleFactor - currentScalesD[i]) * 0.15;
+      splatScene.visible = isPlayingD ? targetVisible : (currentScalesD[i] > 0.01);
+
+      const scaleD = targetDist / boundsD.maxDist;
+      const activeScale = Math.max(0.0001, currentScalesD[i] * scaleD);
+
+      _scratchQ.setFromAxisAngle(_yAxis, playAngleD);
+      _scratchV.copy(boundsD.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
+
+      splatScene.scale.setScalar(activeScale);
+      splatScene.quaternion.copy(_scratchQ);
+      splatScene.position.copy(_scratchV);
     }
 
   } catch (err) {
     console.error('Realtime update error:', err);
     statusEl.textContent = `Mixer error: ${err.message}`;
-  } finally {
-    console.timeEnd('performRealtimeUpdate');
   }
 }
 
@@ -2855,3 +3091,99 @@ btnExport.addEventListener('click', () => {
 
 // ── Initialize Web MIDI ──────────────────────────────────
 initMIDI();
+
+// --- BIND DECKS C & D ---
+function bindDeckEvents(deckLetter) {
+  const L = deckLetter.toLowerCase();
+  const U = deckLetter.toUpperCase();
+
+  const fileInput = document.querySelector(`#file-${L}`);
+  const fileNameEl = document.querySelector(`#file-${L}-name`);
+  const statusEl = document.querySelector('#status');
+  const slider = document.getElementById(`max-splats-slider-${L}`);
+  const valEl = document.getElementById(`max-splats-val-${L}`);
+  
+  const btnLoad = document.getElementById(`btn-load-${L}`);
+  if (btnLoad) {
+    btnLoad.addEventListener('click', async (e) => {
+      const isLoaded = (L === 'a') ? sceneA : (L === 'b') ? sceneB : (L === 'c') ? sceneC : sceneD;
+      if (isLoaded) {
+        e.preventDefault();
+        if (L === 'a') { sceneA = null; rawSceneA = null; }
+        if (L === 'b') { sceneB = null; rawSceneB = null; }
+        if (L === 'c') { sceneC = null; rawSceneC = null; }
+        if (L === 'd') { sceneD = null; rawSceneD = null; }
+        if (fileNameEl) fileNameEl.textContent = 'No file';
+        btnLoad.classList.remove('loaded');
+        if (fileInput) fileInput.value = '';
+        statusEl.textContent = `Scene ${U} unloaded. Rendering...`;
+        await rebuildViewerBuffers();
+        statusEl.textContent = `Scene ${U} unloaded.`;
+      }
+    });
+  }
+
+  if (fileInput) {
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (fileNameEl) fileNameEl.textContent = file.name;
+      statusEl.textContent = `Loading ${file.name} to Deck ${U}...`;
+      try {
+        let rawScene = await loadFileToSplatData(file);
+        if (slider) {
+          slider.min = Math.min(250000, rawScene.splatCount);
+          slider.max = rawScene.splatCount;
+          slider.value = rawScene.splatCount;
+          if (valEl) valEl.textContent = rawScene.splatCount >= 1000000 ? (rawScene.splatCount/1000000).toFixed(1) + 'M' : Math.floor(rawScene.splatCount/1000) + 'k';
+        }
+        let scene = limitSplatCount(rawScene, rawScene.splatCount);
+        if (L === 'a') { rawSceneA = rawScene; sceneA = scene; }
+        if (L === 'b') { rawSceneB = rawScene; sceneB = scene; }
+        if (L === 'c') { rawSceneC = rawScene; sceneC = scene; }
+        if (L === 'd') { rawSceneD = rawScene; sceneD = scene; }
+        await rebuildViewerBuffers();
+        btnLoad?.classList.add('loaded');
+        statusEl.textContent = `Scene ${U} loaded.`;
+        triggerRealtimeUpdate();
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = `Error loading Scene ${U}: ` + err.message;
+      }
+    });
+  }
+  
+  document.getElementById(`btn-play-${L}`)?.addEventListener('click', () => {
+    if (L === 'c') isPlayingC = !isPlayingC;
+    if (L === 'd') isPlayingD = !isPlayingD;
+    const isPlaying = L === 'c' ? isPlayingC : isPlayingD;
+    document.getElementById(`btn-play-${L}`).style.background = isPlaying ? '#10b981' : '#111';
+    triggerRealtimeUpdate();
+  });
+
+  document.getElementById(`btn-stop-${L}`)?.addEventListener('click', () => {
+    if (L === 'c') { isPlayingC = false; playAngleC = 0; }
+    if (L === 'd') { isPlayingD = false; playAngleD = 0; }
+    document.getElementById(`btn-play-${L}`).style.background = '#111';
+    triggerRealtimeUpdate();
+  });
+
+  if (slider && slider.classList.contains('knob')) {
+    updateKnobFill(slider);
+    slider.addEventListener('input', () => updateKnobFill(slider));
+    slider.addEventListener('contextmenu', (e) => { e.preventDefault(); slider.value = slider.defaultValue; updateKnobFill(slider); });
+    slider.addEventListener('dblclick', () => { slider.value = slider.defaultValue; updateKnobFill(slider); });
+  }
+
+  const chunkSlider = document.getElementById(`chunks-slider-${L}`);
+  if (chunkSlider && chunkSlider.classList.contains('knob')) {
+    updateKnobFill(chunkSlider);
+    chunkSlider.addEventListener('input', () => updateKnobFill(chunkSlider));
+    chunkSlider.addEventListener('contextmenu', (e) => { e.preventDefault(); chunkSlider.value = chunkSlider.defaultValue; updateKnobFill(chunkSlider); });
+    chunkSlider.addEventListener('dblclick', () => { chunkSlider.value = chunkSlider.defaultValue; updateKnobFill(chunkSlider); });
+  }
+}
+bindDeckEvents('c');
+bindDeckEvents('d');
+bindDeckEvents('a');
+bindDeckEvents('b');

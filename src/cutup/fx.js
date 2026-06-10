@@ -152,72 +152,13 @@ function copySampledGhosts(source, output, writeIndex, sampledIndexes, opts, mut
 }
 
 export function applyDelayFx(source, params = {}) {
-  const amount = getAmount(params);
-  const opts = {
-    taps: 2,
-    ghostRatio: 0.12 + amount * 0.32,
-    offset: [0.06 + amount * 0.18, 0.01 + amount * 0.03, -0.04 - amount * 0.14],
-    feedback: 0.25 + amount * 0.42,
-  };
-  const count = source.splatCount;
-  const sampledIndexes = getSampledIndexes(count, opts.ghostRatio);
-  const output = new Uint8Array((count + sampledIndexes.length * opts.taps) * 32);
-  output.set(source.data, 0);
-
-  const srcView = new DataView(source.data.buffer, source.data.byteOffset, source.data.byteLength);
-  const dstView = new DataView(output.buffer, output.byteOffset, output.byteLength);
-
-  let writeIndex = count;
-  writeIndex = copySampledGhosts(source, output, writeIndex, sampledIndexes, opts, (data, index, srcIndex, tap) => {
-    const [x, y, z] = getPosition(srcView, srcIndex);
-    setPosition(
-      dstView,
-      index,
-      x + opts.offset[0] * tap,
-      y + opts.offset[1] * tap,
-      z + opts.offset[2] * tap
-    );
-    fadeSplat(data, index, Math.pow(opts.feedback, tap), 0.92);
-    scaleSplatSize(dstView, index, 1 + tap * 0.08);
-  });
-
-  return new SplatData(output.subarray(0, writeIndex * 32));
+  // Utilizing 2D feedback AfterimagePass instead of CPU geometry duplication
+  return source;
 }
 
 export function applyEchoFx(source, params = {}) {
-  const amount = getAmount(params);
-  const opts = {
-    taps: 2 + Math.round(amount * 3),
-    ghostRatio: 0.1 + amount * 0.24,
-    expansion: 0.04 + amount * 0.12,
-    lift: amount * 0.08,
-    feedback: 0.22 + amount * 0.36,
-  };
-  const count = source.splatCount;
-  const center = estimateCenter(source);
-  const sampledIndexes = getSampledIndexes(count, opts.ghostRatio);
-  const output = new Uint8Array((count + sampledIndexes.length * opts.taps) * 32);
-  output.set(source.data, 0);
-
-  const srcView = new DataView(source.data.buffer, source.data.byteOffset, source.data.byteLength);
-  const dstView = new DataView(output.buffer, output.byteOffset, output.byteLength);
-
-  let writeIndex = count;
-  writeIndex = copySampledGhosts(source, output, writeIndex, sampledIndexes, opts, (data, index, srcIndex, tap) => {
-    const [x, y, z] = getPosition(srcView, srcIndex);
-    const spread = 1 + opts.expansion * tap;
-    setPosition(
-      dstView,
-      index,
-      center[0] + (x - center[0]) * spread,
-      center[1] + (y - center[1]) * spread + opts.lift * tap,
-      center[2] + (z - center[2]) * spread
-    );
-    fadeSplat(data, index, Math.pow(opts.feedback, tap), 0.86);
-    scaleSplatSize(dstView, index, 1 + tap * 0.18);
-  });
-
-  return new SplatData(output.subarray(0, writeIndex * 32));
+  // Utilizing 2D feedback AfterimagePass instead of CPU geometry duplication
+  return source;
 }
 
 export function applyPitchFx(source, params = {}) {
