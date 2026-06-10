@@ -1,0 +1,277 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+
+* { box-sizing: border-box; }
+body, html {
+  margin: 0; padding: 0;
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+  font-family: 'Outfit', sans-serif;
+  background-color: #050508;
+  color: #f3f4f6;
+  user-select: none;
+}
+
+#app {
+  width: 100%; height: 100%;
+  position: relative;
+  pointer-events: none;
+}
+
+#viewer-container {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 0;
+  pointer-events: auto;
+}
+
+/* ── HUD Panels ─────────────────────────────────────── */
+.hud-panel {
+  position: absolute;
+  background: rgba(18, 18, 22, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+  pointer-events: auto;
+  display: flex;
+  z-index: 100;
+  transition: opacity 0.3s ease, transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hud-panel.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panel-left {
+  top: 16px; left: 16px; bottom: 16px;
+  width: 300px;
+  border-radius: 16px;
+  flex-direction: column;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.panel-right {
+  top: 16px; right: 16px; bottom: 16px;
+  width: 300px;
+  border-radius: 16px;
+  flex-direction: column;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.panel-top {
+  top: 16px; left: 332px; right: 332px;
+  height: 80px;
+  border-radius: 16px;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 24px;
+}
+
+.panel-bottom {
+  bottom: 16px; left: 332px; right: 332px;
+  height: 120px;
+  border-radius: 16px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 24px;
+}
+
+/* ── Scrollbar hiding for neatness ────────────────────── */
+.panel-left::-webkit-scrollbar, .panel-right::-webkit-scrollbar {
+  width: 0px;
+}
+
+/* ── General UI Elements ────────────────────────────── */
+.section-box {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px inset rgba(255, 255, 255, 0.03);
+}
+.section-box:last-child { margin-bottom: 0; }
+
+.section-title {
+  font-size: 10px; font-weight: 800; color: #666; letter-spacing: 1px;
+  margin: 0 0 8px 0; text-transform: uppercase;
+}
+
+.flex-row { display: flex; align-items: center; gap: 8px; }
+.flex-col { display: flex; flex-direction: column; gap: 8px; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+
+/* ── Buttons & Labels ───────────────────────────────── */
+.load-btn {
+  background: #3b82f6; border: none; color: #fff;
+  padding: 6px 12px; border-radius: 4px; font-size: 11px; font-weight: bold;
+  cursor: pointer; text-transform: uppercase; transition: background 0.2s;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+}
+.load-btn:hover { background: #60a5fa; }
+.load-btn input { display: none; }
+
+.deck-file-name {
+  font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #4ade80;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+}
+
+.round-btn {
+  background: #222; border: 1px solid #444; color: #ccc;
+  padding: 6px; border-radius: 4px; font-size: 9px; font-weight: bold; cursor: pointer;
+  flex: 1;
+}
+.round-btn.active { background: #3b82f6; border-color: #60a5fa; color: #fff; }
+
+.huge-round-btn {
+  width: 48px; height: 48px;
+  border-radius: 50%; font-size: 11px; font-weight: bold;
+  background: #111; border: 2px solid #444; color: #fff;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.huge-round-btn.play { border-color: #4ade80; color: #4ade80; }
+.huge-round-btn.play.active { background: #14532d; box-shadow: 0 0 16px #4ade80; }
+.huge-round-btn.cue { border-color: #f97316; color: #f97316; }
+.huge-round-btn.cue.active { background: #7c2d12; box-shadow: 0 0 16px #f97316; }
+
+/* ── Jog Wheel ──────────────────────────────────────── */
+.jog-wheel {
+  width: 140px; height: 140px; border-radius: 50%; margin: 0 auto;
+  background: conic-gradient(from 0deg, #111, #333, #111, #333, #111);
+  border: 4px solid #000; box-shadow: 0 8px 16px rgba(0,0,0,0.8), inset 0 2px 4px rgba(255,255,255,0.1);
+  position: relative; display: flex; align-items: center; justify-content: center;
+  cursor: grab;
+}
+.jog-inner {
+  width: 110px; height: 110px; border-radius: 50%;
+  background: #0a0a0c; border: 2px solid #1a1a1c;
+  position: relative;
+}
+.jog-needle {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  width: 2px; height: 12px; background: #ef4444; border-radius: 1px;
+}
+
+/* ── Knobs ──────────────────────────────────────────── */
+.knob-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.knob-label { font-size: 9px; font-weight: bold; color: #888; }
+.knob {
+  -webkit-appearance: none; appearance: none;
+  width: 32px; height: 32px; border-radius: 50%;
+  background: conic-gradient(from 225deg, #444 0%, #444 75%, #111 75%, #111 100%);
+  border: 2px solid #000; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.6);
+}
+
+.knob::before {
+  content: ''; position: absolute; top: 4px; left: 50%; width: 2px; height: 10px;
+  background: #fff; transform: translateX(-50%); border-radius: 1px; pointer-events: none;
+}
+
+/* ── Vertical Sliders (Rotated via Wrapper) ─────────── */
+.fader-wrapper {
+  width: 32px; height: 120px; position: relative; margin: 0 auto;
+}
+.ch-fader {
+  -webkit-appearance: none; appearance: none;
+  position: absolute; top: 120px; left: 0;
+  width: 120px; height: 32px;
+  transform: rotate(-90deg); transform-origin: top left;
+  background: #050508; border: 1px inset #222; border-radius: 4px; margin: 0;
+}
+.ch-fader::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 20px; height: 32px; background: #fff; border: 1px solid #000;
+  border-radius: 2px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+
+.tempo-wrapper {
+  width: 24px; height: 120px; position: relative; margin: 0 auto;
+}
+.tempo-slider {
+  -webkit-appearance: none; appearance: none;
+  position: absolute; top: 120px; left: 0;
+  width: 120px; height: 24px;
+  transform: rotate(-90deg); transform-origin: top left;
+  background: #050508; border: 1px inset #222; border-radius: 4px; margin: 0;
+}
+.tempo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 24px; background: #ccc; border: 1px solid #000;
+  border-radius: 2px; cursor: pointer;
+}
+
+/* ── Pads ───────────────────────────────────────────── */
+.pads-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(2, 1fr);
+  gap: 6px; width: 100%;
+}
+.pad-btn {
+  width: 100%; height: 36px;
+  background: #1a1a1c; border: 1px solid #333; border-radius: 4px;
+  color: #666; font-size: 11px; font-weight: bold; cursor: pointer;
+  box-shadow: inset 0 2px 4px rgba(255,255,255,0.05);
+}
+.pad-btn:active, .pad-btn.active {
+  background: rgba(59, 130, 246, 0.4); border-color: #3b82f6; color: #fff;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.8);
+}
+.panel-right .pad-btn:active, .panel-right .pad-btn.active {
+  background: rgba(249, 115, 22, 0.4); border-color: #f97316; color: #fff;
+  box-shadow: 0 0 12px rgba(249, 115, 22, 0.8);
+}
+
+/* ── Master Panel (Top) ─────────────────────────────── */
+.master-section { display: flex; align-items: center; gap: 24px; width: 100%; }
+
+.crossfader-container { flex: 1; max-width: 400px; margin: 0 auto; }
+.crossfader-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 24px; background: #050508; border: 1px inset #222; border-radius: 4px;
+}
+.crossfader-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 40px; height: 32px; background: #333; border: 1px solid #000;
+  border-radius: 4px; cursor: pointer; box-shadow: inset 0 2px 4px rgba(255,255,255,0.2);
+}
+
+.vu-meters { display: flex; gap: 8px; align-items: center; }
+.vu-bar {
+  width: 120px; height: 8px; background: #000; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #222;
+}
+.vu-active {
+  position: absolute; top: 0; left: 0; width: 0%; height: 100%;
+  background: linear-gradient(90deg, #10b981 60%, #eab308 85%, #ef4444 100%);
+  transition: width 0.05s;
+}
+
+/* ── FX Panel (Bottom) ──────────────────────────────── */
+.fx-section { display: flex; align-items: center; gap: 24px; flex: 1; }
+.fx-select-dropdown {
+  background: #000; border: 1px solid #333; color: #fff; font-size: 11px; padding: 6px; border-radius: 4px; outline: none;
+}
+.fx-toggle-btn {
+  background: #111; border: 2px solid #3b82f6; color: #3b82f6; padding: 12px 24px; border-radius: 8px;
+  font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.2s;
+}
+.fx-toggle-btn.active { background: #1e3a8a; color: #fff; box-shadow: 0 0 16px rgba(59,130,246,0.8); }
+
+.util-section { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.util-btn { background: #222; border: 1px solid #444; color: #ccc; font-size: 10px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+.util-btn:hover { background: #333; color: #fff; }
+
+#status { font-family: 'Share Tech Mono', monospace; font-size: 12px; color: #10b981; margin-top: 4px; }
+
+/* ── Top Bar collapse tab ───────────────────────────── */
+.collapse-tab {
+  position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+  background: rgba(17,17,17,0.8); border: 1px solid #333; color: #fff;
+  padding: 8px 16px; border-radius: 8px; font-weight: bold; font-size: 12px;
+  cursor: pointer; pointer-events: auto; z-index: 10000; transition: 0.2s;
+  backdrop-filter: blur(8px);
+}
+.collapse-tab:hover { background: rgba(59,130,246,0.4); border-color: #3b82f6; }
+.collapse-tab.hidden { display: none; }
