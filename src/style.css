@@ -161,13 +161,22 @@ body, html {
 .knob-label { font-size: 9px; font-weight: bold; color: #888; }
 .knob {
   -webkit-appearance: none; appearance: none;
-  width: 32px; height: 32px; border-radius: 50%;
-  background: conic-gradient(from 225deg, #444 0%, #444 75%, #111 75%, #111 100%);
-  border: 2px solid #000; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.6);
+  width: 48px; height: 48px; border-radius: 50%;
+  background: conic-gradient(from 225deg, #f97316 0% var(--value, 50%), #1a1a1a var(--value, 50%) 100%);
+  border: 2px solid #111; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.07);
+  position: relative;
+  transition: box-shadow 0.15s;
+}
+.knob:hover {
+  box-shadow: 0 2px 12px rgba(249,115,22,0.4), 0 0 0 1px rgba(249,115,22,0.3);
+}
+.knob:active {
+  box-shadow: 0 0 20px rgba(249,115,22,0.6), 0 0 0 2px rgba(249,115,22,0.5);
 }
 
 .knob::before {
-  content: ''; position: absolute; top: 4px; left: 50%; width: 2px; height: 10px;
+  content: ''; position: absolute; top: 4px; left: 50%; width: 2px; height: 12px;
   background: #fff; transform: translateX(-50%); border-radius: 1px; pointer-events: none;
 }
 

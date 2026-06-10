@@ -547,9 +547,10 @@ export function applyPhaserFx(source, params = {}) {
     const phaseB = Math.cos((pz - bounds.center[2]) * (8 + amount * 14) - (px - bounds.center[0]) * (4 + amount * 9));
     const notch = 0.5 + 0.5 * phaseA * phaseB;
 
-    output[base + 24] = clampByte(output[base + 24] * (1 - amount * 0.3 + notch * amount * 0.62));
-    output[base + 25] = clampByte(output[base + 25] * (1 + amount * 0.24 - notch * amount * 0.5));
-    output[base + 26] = clampByte(output[base + 26] * (1 - amount * 0.22 + (1 - notch) * amount * 0.66));
+    const scaleFactor = 1.0 - amount * 0.4 + notch * amount * 0.4;
+    view.setFloat32(base + 12, view.getFloat32(base + 12, true) * scaleFactor, true);
+    view.setFloat32(base + 16, view.getFloat32(base + 16, true) * scaleFactor, true);
+    view.setFloat32(base + 20, view.getFloat32(base + 20, true) * scaleFactor, true);
   }
 
   return new SplatData(output);

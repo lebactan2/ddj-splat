@@ -1472,6 +1472,7 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYA;
           uniform float uFxPitchStretchXA;
           uniform float uFxBeatFreqA;
+          uniform float uFxPhaserAmountA;
           
           uniform float uFxFlangerAmountB;
           uniform float uFxPitchSquashXB;
@@ -1479,6 +1480,7 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYB;
           uniform float uFxPitchStretchXB;
           uniform float uFxBeatFreqB;
+          uniform float uFxPhaserAmountB;
           
           uniform float uFxFlangerAmountM;
           uniform float uFxPitchSquashXM;
@@ -1486,6 +1488,7 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYM;
           uniform float uFxPitchStretchXM;
           uniform float uFxBeatFreqM;
+          uniform float uFxPhaserAmountM;
         ` + shader;
         
         shader = shader.replace(
@@ -1494,7 +1497,7 @@ async function rebuildViewerBuffers() {
           vec3 displacedCenter = splatCenter;
           bool isDeckA = sceneIndex < uDeckAChunkCount;
           
-          // Apply Flanger
+          // Apply Flanger (Pseudo-Perlin Noise)
           float flangerAmount = 0.0;
           float beatFreq = 1.0;
           if (isDeckA) {
@@ -1514,10 +1517,31 @@ async function rebuildViewerBuffers() {
           }
           
           if (flangerAmount > 0.0) {
-              float wave1 = sin(uFxTime * beatFreq + displacedCenter.y * 5.0 + displacedCenter.x * 2.0);
-              float wave2 = sin(uFxTime * beatFreq * 2.5 + displacedCenter.y * 15.0 + displacedCenter.x * 10.0);
-              float spikyWave = wave1 + (wave2 * flangerAmount * 1.5);
-              displacedCenter *= (1.0 + spikyWave * flangerAmount * 0.4);
+              vec3 p = displacedCenter * 5.0;
+              vec3 cell = floor(p);
+              vec3 frac = fract(p);
+              vec3 jitter = sin(cell * 11.45 + uFxTime * beatFreq * 2.0) * 0.45;
+              float dist = length(frac - (0.5 + jitter));
+              float voronoiNoise = smoothstep(0.0, 0.8, dist);
+              displacedCenter *= (1.0 + voronoiNoise * flangerAmount * 0.6);
+          }
+          
+          // Apply Phaser
+          float phaserAmount = 0.0;
+          if (isDeckA) {
+              if (uFxPhaserAmountA > 0.0) phaserAmount = uFxPhaserAmountA;
+          } else {
+              if (uFxPhaserAmountB > 0.0) phaserAmount = uFxPhaserAmountB;
+          }
+          if (uFxPhaserAmountM > 0.0) phaserAmount += uFxPhaserAmountM;
+          
+          if (phaserAmount > 0.0) {
+              float spatialWaveBase = sin(displacedCenter.y * 15.0 + displacedCenter.x * 10.0 + displacedCenter.z * 5.0);
+              float sweepPhase = uFxTime * beatFreq * 3.0;
+              float spatialWaveShifted = sin(displacedCenter.y * 15.0 + displacedCenter.x * 10.0 + displacedCenter.z * 5.0 + sweepPhase);
+              float notchSum = (spatialWaveBase + spatialWaveShifted) * 0.5;
+              float phaserScale = mix(1.0, 0.5 + 0.5 * notchSum, phaserAmount);
+              displacedCenter *= phaserScale;
           }
           
           // Apply Pitch
@@ -1543,9 +1567,16 @@ async function rebuildViewerBuffers() {
           pitchSquashY *= uFxPitchSquashYM;
           pitchStretchX *= uFxPitchStretchXM;
           
-          if (pitchSquashX < 1.0 || pitchStretchY > 1.0 || pitchSquashY < 1.0 || pitchStretchX > 1.0) {
-              displacedCenter.x *= pitchSquashX * pitchStretchX;
               displacedCenter.y *= pitchStretchY * pitchSquashY;
+          }
+          
+          float faderScale = 1.0;
+          if (isDeckA) {
+              faderScale = uFaderScaleA;
+              vOpacityMult = uStrobeAlphaA;
+          } else {
+              faderScale = uFaderScaleB;
+              vOpacityMult = uStrobeAlphaB;
           }
           
           vec4 viewCenter = transformModelViewMatrix * vec4(displacedCenter, 1.0);
@@ -1557,6 +1588,7 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uDeckAChunkCount = { value: 0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountA = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountA = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXA = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYA = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYA = { value: 1.0 };
@@ -1564,6 +1596,7 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uFxBeatFreqA = { value: 1.0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountB = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountB = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXB = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYB = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYB = { value: 1.0 };
@@ -1571,11 +1604,29 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uFxBeatFreqB = { value: 1.0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountM = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountM = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchXM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxBeatFreqM = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uFaderScaleA = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uFaderScaleB = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uStrobeAlphaA = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uStrobeAlphaB = { value: 1.0 };
+        
+        let fragShader = viewer.splatMesh.material.fragmentShader;
+        if (!fragShader.includes('vOpacityMult')) {
+          fragShader = `
+            varying float vOpacityMult;
+          ` + fragShader;
+          fragShader = fragShader.replace(
+            'gl_FragColor = vec4(vColor.rgb, w);',
+            'gl_FragColor = vec4(vColor.rgb, w * vOpacityMult);'
+          );
+          viewer.splatMesh.material.fragmentShader = fragShader;
+        }
+
         viewer.splatMesh.material.needsUpdate = true;
       }
     }
@@ -1942,6 +1993,7 @@ function triggerRealtimeUpdate() {
       // Deck A
       uniforms.uFxBeatFreqA.value = beatFreqA;
       uniforms.uFxFlangerAmountA.value = (fxEngagedA && fxActiveA === 'flanger') ? amountA : 0.0;
+      uniforms.uFxPhaserAmountA.value = (fxEngagedA && fxActiveA === 'phaser') ? amountA : 0.0;
       if (fxEngagedA && fxActiveA === 'pitch') {
         if (amountA > 0.5) {
           const shiftAmount = (amountA - 0.5) * 2.0;
@@ -1966,6 +2018,7 @@ function triggerRealtimeUpdate() {
       // Deck B
       uniforms.uFxBeatFreqB.value = beatFreqB;
       uniforms.uFxFlangerAmountB.value = (fxEngagedB && fxActiveB === 'flanger') ? amountB : 0.0;
+      uniforms.uFxPhaserAmountB.value = (fxEngagedB && fxActiveB === 'phaser') ? amountB : 0.0;
       if (fxEngagedB && fxActiveB === 'pitch') {
         if (amountB > 0.5) {
           const shiftAmount = (amountB - 0.5) * 2.0;
@@ -1990,6 +2043,7 @@ function triggerRealtimeUpdate() {
       // Master
       uniforms.uFxBeatFreqM.value = beatFreqM;
       uniforms.uFxFlangerAmountM.value = (fxEngagedM && fxActiveM === 'flanger') ? amountM : 0.0;
+      uniforms.uFxPhaserAmountM.value = (fxEngagedM && fxActiveM === 'phaser') ? amountM : 0.0;
       if (fxEngagedM && fxActiveM === 'pitch') {
         if (amountM > 0.5) {
           const shiftAmount = (amountM - 0.5) * 2.0;
@@ -2010,6 +2064,9 @@ function triggerRealtimeUpdate() {
         uniforms.uFxPitchSquashYM.value = 1.0;
         uniforms.uFxPitchStretchXM.value = 1.0;
       }
+      
+      uniforms.uFaderScaleA.value = getChSettings(1).fader;
+      uniforms.uFaderScaleB.value = getChSettings(2).fader;
     }
 
     const isRollA = (fxEngagedA && fxActiveA === 'roll') || (fxEngagedM && fxActiveM === 'roll');
@@ -2025,33 +2082,93 @@ function triggerRealtimeUpdate() {
     lastRollStateB = isRollB;
 
     // Calculate strobe values
-    let maxStrobeOpacity = 0;
-    
     const isTransA = (fxEngagedA && fxActiveA === 'trans') || (fxEngagedM && fxActiveM === 'trans');
     const isTransB = (fxEngagedB && fxActiveB === 'trans') || (fxEngagedM && fxActiveM === 'trans');
     
-    let strobeOnA = true;
+    let strobeAlphaA = 1.0;
     if (isTransA) {
-      const MathPhase = Date.now() * 0.001 * Math.PI * 2 * ((fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqA) * 2;
-      strobeOnA = Math.sin(MathPhase) > (2.0 * ((fxEngagedM && fxActiveM === 'trans') ? amountM : amountA) - 1.0);
-      if (!strobeOnA) {
-        maxStrobeOpacity = Math.max(maxStrobeOpacity, ((fxEngagedM && fxActiveM === 'trans') ? amountM : amountA) * 0.45);
-      }
+      const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqA;
+      const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountA;
+      const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq * 2;
+      const isTransOn = Math.sin(phase) > 0;
+      const offAlpha = Math.max(0.0, 1.0 - transAmount);
+      strobeAlphaA = isTransOn ? 1.0 : offAlpha;
     }
     
-    let strobeOnB = true;
+    let strobeAlphaB = 1.0;
     if (isTransB) {
-      const MathPhase = Date.now() * 0.001 * Math.PI * 2 * ((fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqB) * 2;
-      strobeOnB = Math.sin(MathPhase) > (2.0 * ((fxEngagedM && fxActiveM === 'trans') ? amountM : amountB) - 1.0);
-      if (!strobeOnB) {
-        maxStrobeOpacity = Math.max(maxStrobeOpacity, ((fxEngagedM && fxActiveM === 'trans') ? amountM : amountB) * 0.45);
-      }
+      const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqB;
+      const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountB;
+      const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq * 2;
+      const isTransOn = Math.sin(phase) > 0;
+      const offAlpha = Math.max(0.0, 1.0 - transAmount);
+      strobeAlphaB = isTransOn ? 1.0 : offAlpha;
     }
     
+    if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uStrobeAlphaA) {
+      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaA;
+      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB;
+    }
+
+    // Background sequencer strobe (strips around edges)
+    if (!document.getElementById('seq-t')) {
+      const seqStyle = "position:fixed; background:white; opacity:0; pointer-events:none; z-index:10; box-shadow:0 0 80px 40px white; transition:opacity 0.05s ease-out;";
+      const createBlock = (id, props) => {
+        const el = document.createElement('div');
+        el.id = id;
+        el.style.cssText = seqStyle + props;
+        document.body.appendChild(el);
+      };
+      createBlock('seq-t', 'top:0; left:0; width:100vw; height:3vh;');
+      createBlock('seq-r', 'top:0; right:0; width:3vh; height:100vh;');
+      createBlock('seq-b', 'bottom:0; left:0; width:100vw; height:3vh;');
+      createBlock('seq-l', 'top:0; left:0; width:3vh; height:100vh;');
+    }
+
+    const anyTransActive = isTransA || isTransB;
+    if (anyTransActive) {
+      const globalSeqPhase = Math.floor((Date.now() * 0.001 * beatFreqM * 2)) % 4;
+      const overallTransAmount = Math.max(
+        (fxEngagedA && fxActiveA === 'trans') ? amountA : 0,
+        (fxEngagedB && fxActiveB === 'trans') ? amountB : 0,
+        (fxEngagedM && fxActiveM === 'trans') ? amountM : 0
+      );
+      
+      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+      seqBlocks.forEach((id, idx) => {
+        const el = document.getElementById(id);
+        if (el) {
+          if (idx === globalSeqPhase) {
+            el.style.opacity = overallTransAmount * 0.9;
+          } else {
+            el.style.opacity = 0;
+          }
+        }
+      });
+    } else {
+      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+      seqBlocks.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.opacity = 0;
+      });
+    }
+
     const strobeOverlayEl = document.getElementById('strobe-overlay');
     if (strobeOverlayEl) {
-      strobeOverlayEl.style.opacity = maxStrobeOpacity;
+      // strobeOverlayEl.style.opacity = maxStrobeOpacity; // Removed bg strobe as requested
     }
+
+    const isRollA = (fxEngagedA && fxActiveA === 'roll') || (fxEngagedM && fxActiveM === 'roll');
+    const isRollB = (fxEngagedB && fxActiveB === 'roll') || (fxEngagedM && fxActiveM === 'roll');
+    
+    if (isRollA && !lastRollStateA) {
+      frozenPlayAngleA = playAngleA;
+    }
+    if (isRollB && !lastRollStateB) {
+      frozenPlayAngleB = playAngleB;
+    }
+    lastRollStateA = isRollA;
+    lastRollStateB = isRollB;
 
     let sceneIdx = 0;
 
@@ -2086,11 +2203,7 @@ function triggerRealtimeUpdate() {
       }
       
       currentScalesA[i] += (targetScaleFactor - currentScalesA[i]) * 0.15;
-      splatScene.visible = currentScalesA[i] > 0.01;
-      
-      if (!strobeOnA) {
-        splatScene.visible = false;
-      }
+      splatScene.visible = isPlaying ? targetVisible : (currentScalesA[i] > 0.01);
       
       const scaleA = targetDist / boundsA.maxDist;
       const activeScale = Math.max(0.0001, currentScalesA[i] * scaleA * beatScaleMult);

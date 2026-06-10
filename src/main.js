@@ -13,6 +13,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CopyShader } from 'three/examples/jsm/shaders/CopyShader.js';
 import { BokehPass } from 'three/examples/jsm/postprocessing/BokehPass.js';
 import { Lensflare, LensflareElement } from 'three/examples/jsm/objects/Lensflare.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { applyTransforms } from './cutup/transform.js';
 import {
   applyDelayFx,
@@ -324,27 +325,45 @@ appDiv.innerHTML = `
   <!-- BOTTOM PANEL: MASTER FX & UTILS -->
   <div class="hud-panel panel-bottom">
     <!-- Settings (Left Column) -->
-    <div class="flex-col" style="justify-self: start; gap:8px; align-items: flex-start;">
+    <div class="flex-col" style="justify-self: start; gap:6px; align-items: flex-start;">
       <div class="flex-row">
         <span style="font-size:10px; font-weight:bold; color:#888;">UI OPACITY</span>
-        <input type="range" id="ui-opacity" min="10" max="100" value="100" style="width:80px;cursor:pointer;">
+        <input type="range" id="ui-opacity" min="10" max="100" value="100" style="width:70px;cursor:pointer;">
       </div>
       <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
         <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG (IMAGES)
       </label>
-      <div class="flex-col" style="gap:4px; align-items:stretch;">
-        <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-          <input type="checkbox" id="chk-use-colab"> USE COLAB GPU
-        </label>
-        <div class="flex-row" style="gap:8px; margin-top:2px;">
+      
+      <div class="flex-row" style="gap:16px; align-items: flex-end; margin-top:2px;">
+        <div class="flex-col" style="gap:4px;">
           <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="checkbox" id="chk-dof"> DOF
+            <input type="checkbox" id="chk-use-colab"> USE COLAB GPU
           </label>
-          <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="checkbox" id="chk-lensflare"> LENS FLARE
-          </label>
+          <input type="text" id="colab-url" placeholder="Paste loca.lt URL here..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:110px; box-sizing:border-box;">
         </div>
-        <input type="text" id="colab-url" placeholder="Paste loca.lt URL here..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:100px; box-sizing:border-box;">
+        
+        <div class="flex-row" style="gap:12px;">
+          <div class="knob-cell">
+            <span class="knob-label">DOF</span>
+            <input type="range" min="0" max="100" value="0" class="knob" id="knob-dof">
+          </div>
+          <div class="knob-cell">
+            <span class="knob-label">FLARE</span>
+            <input type="range" min="0" max="100" value="0" class="knob" id="knob-lensflare">
+          </div>
+          <div class="knob-cell" style="align-items:flex-start;">
+            <span class="knob-label" style="margin-bottom:2px;">HDRI</span>
+            <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer; width:80px;">
+              <option value="none">NONE</option>
+              <option value="sunset">SUNSET</option>
+              <option value="studio">STUDIO</option>
+              <option value="night">NIGHT CITY</option>
+              <option value="forest">FOREST</option>
+              <option value="custom-url">CUSTOM URL...</option>
+              <option value="local-file">UPLOAD FILE...</option>
+            </select>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -552,6 +571,13 @@ allKnobs.forEach(knob => {
     updateKnobFill(knob);
     triggerRealtimeUpdate();
   });
+  // Right-click = reset to default
+  knob.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    knob.value = knob.defaultValue;
+    updateKnobFill(knob);
+    triggerRealtimeUpdate();
+  });
 });
 
 // Attach change event listeners to mixer knobs to trigger full buffer rebuilds
@@ -566,9 +592,15 @@ mixerKnobs.forEach(knob => {
     triggerRealtimeUpdate();
     await rebuildViewerBuffers();
   });
+  knob.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    knob.value = knob.defaultValue;
+    updateKnobFill(knob);
+    triggerRealtimeUpdate();
+  });
 });
 
-// Attach input and change event listeners to channel faders
+// Attach input event listener to channel faders
 const chFaders = document.querySelectorAll('.ch-fader');
 chFaders.forEach(fader => {
   fader.addEventListener('input', () => {
@@ -578,6 +610,181 @@ chFaders.forEach(fader => {
     fader.value = fader.defaultValue || 100;
     triggerRealtimeUpdate();
   });
+  // Right-click = reset to default
+  fader.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    fader.value = fader.defaultValue || 100;
+    triggerRealtimeUpdate();
+  });
+});
+
+// ── DOF knob wiring ──
+const knobDof = document.getElementById('knob-dof');
+const knobLensFlare = document.getElementById('knob-lensflare');
+updateKnobFill(knobDof);
+updateKnobFill(knobLensFlare);
+knobDof.addEventListener('input', () => {
+  updateKnobFill(knobDof);
+  // Disabled BokehPass post-processing to avoid uniform full-screen blur,
+  // allowing the true distance-based vertex shader DOF to render instead.
+  if (bokehPass) {
+    bokehPass.enabled = false;
+  }
+});
+knobDof.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  knobDof.value = 0;
+  updateKnobFill(knobDof);
+  if (bokehPass) bokehPass.enabled = false;
+});
+knobLensFlare.addEventListener('input', () => {
+  updateKnobFill(knobLensFlare);
+  const amount = Number(knobLensFlare.value) / 100;
+  if (lensflareLight) {
+    lensflareLight.visible = amount > 0;
+    lensflareLight.intensity = amount * 3.0;
+  }
+});
+knobLensFlare.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  knobLensFlare.value = 0;
+  updateKnobFill(knobLensFlare);
+  if (lensflareLight) lensflareLight.visible = false;
+});
+
+// ── HDRI Environment ──
+let currentHdriTexture = null;
+let currentHdriEnv = null;
+const hdriPresets = {
+  none: null,
+  studio: '/hdri/studio.hdr',
+  sunset: '/hdri/sunset.hdr',
+  night:  '/hdri/night.hdr',
+  forest: '/hdri/forest.hdr',
+};
+
+async function loadHdriFromUrl(url) {
+  if (!viewer || !viewer.renderer) return;
+  
+  if (viewer.threeScene) {
+    if (viewer.threeScene.background && typeof viewer.threeScene.background.dispose === 'function') {
+      viewer.threeScene.background.dispose();
+    }
+    viewer.threeScene.background = null;
+    viewer.threeScene.environment = null;
+  }
+  if (currentHdriTexture) {
+    currentHdriTexture.dispose();
+    currentHdriTexture = null;
+  }
+  if (currentHdriEnv) {
+    currentHdriEnv.dispose();
+    currentHdriEnv = null;
+  }
+  
+  try {
+    const loader = new HDRLoader();
+    const texture = await new Promise((resolve, reject) => {
+      loader.load(url, resolve, undefined, reject);
+    });
+    
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    currentHdriTexture = texture;
+    
+    if (viewer.threeScene) {
+      viewer.threeScene.background = texture;
+    }
+    
+    // Also use for environment lighting (optional for splats but good to have)
+    const pmrem = new THREE.PMREMGenerator(viewer.renderer);
+    pmrem.compileEquirectangularShader();
+    const envMap = pmrem.fromEquirectangular(texture).texture;
+    pmrem.dispose();
+    currentHdriEnv = envMap;
+    
+    if (viewer.threeScene) {
+      viewer.threeScene.environment = envMap;
+    }
+  } catch(e) {
+    console.warn('HDRI load failed:', e);
+    alert('Failed to load HDRI: ' + e.message);
+    const select = document.getElementById('hdri-select');
+    if (select) select.value = 'none';
+  }
+}
+
+function reapplyHdri() {
+  if (!viewer || !viewer.threeScene) return;
+  if (currentHdriTexture) {
+    viewer.threeScene.background = currentHdriTexture;
+  }
+  if (currentHdriEnv) {
+    viewer.threeScene.environment = currentHdriEnv;
+  }
+}
+
+async function setHdri(preset) {
+  if (preset === 'none') {
+    if (viewer && viewer.threeScene) {
+      if (viewer.threeScene.background && typeof viewer.threeScene.background.dispose === 'function') {
+        viewer.threeScene.background.dispose();
+      }
+      viewer.threeScene.background = null;
+      viewer.threeScene.environment = null;
+    }
+    if (currentHdriTexture) {
+      currentHdriTexture.dispose();
+      currentHdriTexture = null;
+    }
+    if (currentHdriEnv) {
+      currentHdriEnv.dispose();
+      currentHdriEnv = null;
+    }
+    return;
+  }
+  
+  if (preset === 'custom-url') {
+    const url = prompt("Enter HDRI URL (.hdr):");
+    if (!url) {
+      const select = document.getElementById('hdri-select');
+      if (select) select.value = 'none';
+      return;
+    }
+    await loadHdriFromUrl(url);
+    return;
+  }
+  
+  if (preset === 'local-file') {
+    let fileInput = document.getElementById('hdri-file-input');
+    if (!fileInput) {
+      fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.id = 'hdri-file-input';
+      fileInput.accept = '.hdr';
+      fileInput.style.display = 'none';
+      document.body.appendChild(fileInput);
+      fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const blobUrl = URL.createObjectURL(file);
+          await loadHdriFromUrl(blobUrl);
+        } else {
+          const select = document.getElementById('hdri-select');
+          if (select) select.value = 'none';
+        }
+      });
+    }
+    fileInput.click();
+    return;
+  }
+  
+  const url = hdriPresets[preset];
+  if (!url) return;
+  await loadHdriFromUrl(url);
+}
+
+document.getElementById('hdri-select')?.addEventListener('change', (e) => {
+  setHdri(e.target.value);
 });
 
 // Sync crossfader to hidden mixSlider for test suite compatibility
@@ -1302,18 +1509,103 @@ function processFx(scene, deckStr) {
   return currentScene;
 }
 
-function createGlowTexture(color, size) {
+function createMainFlareTexture(size) {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
-  const gradient = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  gradient.addColorStop(0, color);
-  gradient.addColorStop(0.2, color);
-  gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.05)');
-  gradient.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = gradient;
+  const cx = size / 2;
+  const cy = size / 2;
+  
+  // Central bright glow
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.15);
+  grad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+  grad.addColorStop(0.2, 'rgba(255, 244, 220, 0.8)');
+  grad.addColorStop(0.5, 'rgba(249, 115, 22, 0.2)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
+  
+  // Diffraction spikes (8 rays)
+  const numRays = 8;
+  ctx.save();
+  ctx.translate(cx, cy);
+  for (let i = 0; i < numRays; i++) {
+    ctx.rotate((Math.PI * 2) / numRays);
+    const spikeGrad = ctx.createLinearGradient(0, 0, size / 2, 0);
+    spikeGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+    spikeGrad.addColorStop(0.1, 'rgba(249, 115, 22, 0.3)');
+    spikeGrad.addColorStop(0.6, 'rgba(249, 115, 22, 0.05)');
+    spikeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    
+    ctx.fillStyle = spikeGrad;
+    ctx.beginPath();
+    ctx.moveTo(0, -1.5);
+    ctx.lineTo(size / 2, 0);
+    ctx.lineTo(0, 1.5);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+  
+  return new THREE.CanvasTexture(canvas);
+}
+
+function createHexagonTexture(colorStr, size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 4;
+  
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI / 3) * i;
+    const x = cx + r * Math.cos(angle);
+    const y = cy + r * Math.sin(angle);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  grad.addColorStop(0, colorStr);
+  grad.addColorStop(0.8, colorStr);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  
+  ctx.strokeStyle = colorStr.replace(/[^,]+(?=\))/, '0.3');
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  
+  return new THREE.CanvasTexture(canvas);
+}
+
+function createRainbowRingTexture(size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2;
+  const cy = size / 2;
+  const rOuter = size / 2 - 2;
+  
+  const grad = ctx.createRadialGradient(cx, cy, rOuter * 0.8, cx, cy, rOuter);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.1, 'rgba(139, 92, 246, 0.0)');
+  grad.addColorStop(0.3, 'rgba(59, 130, 246, 0.08)');
+  grad.addColorStop(0.6, 'rgba(16, 185, 129, 0.08)');
+  grad.addColorStop(0.8, 'rgba(252, 211, 77, 0.08)');
+  grad.addColorStop(1.0, 'rgba(239, 68, 68, 0.0)');
+  
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rOuter, 0, Math.PI * 2);
+  ctx.fill();
+  
   return new THREE.CanvasTexture(canvas);
 }
 
@@ -1325,19 +1617,25 @@ function setupPostProcessingAndLensFlare() {
     lensflareLight = new THREE.PointLight(0xffffff, 1.5, 2000);
     lensflareLight.position.set(2, 6, -6);
 
-    const flareTex = createGlowTexture('rgba(255, 255, 255, 0.8)', 128);
-    const flareRing = createGlowTexture('rgba(249, 115, 22, 0.2)', 256);
+    const mainTex = createMainFlareTexture(256);
+    const hexTex1 = createHexagonTexture('rgba(249, 115, 22, 0.08)', 128);
+    const hexTex2 = createHexagonTexture('rgba(59, 130, 246, 0.06)', 96);
+    const hexTex3 = createHexagonTexture('rgba(16, 185, 129, 0.05)', 64);
+    const ringTex = createRainbowRingTexture(512);
 
     const lensflare = new Lensflare();
-    lensflare.addElement(new LensflareElement(flareTex, 300, 0.0));
-    lensflare.addElement(new LensflareElement(flareRing, 60, 0.6));
-    lensflare.addElement(new LensflareElement(flareRing, 70, 0.7));
-    lensflare.addElement(new LensflareElement(flareRing, 120, 0.9));
-    lensflare.addElement(new LensflareElement(flareRing, 70, 1.0));
+    lensflare.addElement(new LensflareElement(mainTex, 450, 0.0));
+    lensflare.addElement(new LensflareElement(ringTex, 400, 0.2));
+    lensflare.addElement(new LensflareElement(hexTex1, 90, 0.5));
+    lensflare.addElement(new LensflareElement(hexTex2, 120, 0.75));
+    lensflare.addElement(new LensflareElement(hexTex3, 60, 0.9));
+    lensflare.addElement(new LensflareElement(hexTex1, 140, 1.0));
 
     lensflareLight.add(lensflare);
-    const chkLensFlare = document.getElementById('chk-lensflare');
-    if (chkLensFlare) lensflareLight.visible = chkLensFlare.checked;
+    const knobLensFlare = document.getElementById('knob-lensflare');
+    const flareAmount = knobLensFlare ? (Number(knobLensFlare.value) / 100) : 0;
+    lensflareLight.visible = flareAmount > 0;
+    lensflareLight.intensity = flareAmount * 3.0;
     viewer.threeScene.add(lensflareLight);
   }
 
@@ -1431,6 +1729,7 @@ async function rebuildViewerBuffers() {
   
   updateGlobalBounds();
   await makeViewer();
+  reapplyHdri();
   
   try {
     const buffers = [];
@@ -1511,6 +1810,7 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYA;
           uniform float uFxPitchStretchXA;
           uniform float uFxBeatFreqA;
+          uniform float uFxPhaserAmountA;
           
           uniform float uFxFlangerAmountB;
           uniform float uFxPitchSquashXB;
@@ -1518,6 +1818,7 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYB;
           uniform float uFxPitchStretchXB;
           uniform float uFxBeatFreqB;
+          uniform float uFxPhaserAmountB;
           
           uniform float uFxFlangerAmountM;
           uniform float uFxPitchSquashXM;
@@ -1525,9 +1826,16 @@ async function rebuildViewerBuffers() {
           uniform float uFxPitchSquashYM;
           uniform float uFxPitchStretchXM;
           uniform float uFxBeatFreqM;
+          uniform float uFxPhaserAmountM;
           
           uniform float uFaderScaleA;
           uniform float uFaderScaleB;
+          
+          uniform float uStrobeAlphaA;
+          uniform float uStrobeAlphaB;
+          uniform float uDofFocus;
+          uniform float uDofAmount;
+          varying float vOpacityMult;
         ` + shader;
         
         // Inject FX displacement AFTER splatCenter is read but BEFORE viewCenter.
@@ -1539,7 +1847,7 @@ async function rebuildViewerBuffers() {
           vec3 displacedCenter = splatCenter;
           bool isDeckA = sceneIndex < uDeckAChunkCount;
           
-          // Apply Flanger
+          // Apply Flanger (Pseudo-Perlin Noise)
           float flangerAmount = 0.0;
           float beatFreq = 1.0;
           if (isDeckA) {
@@ -1559,10 +1867,31 @@ async function rebuildViewerBuffers() {
           }
           
           if (flangerAmount > 0.0) {
-              float wave1 = sin(uFxTime * beatFreq + displacedCenter.y * 5.0 + displacedCenter.x * 2.0);
-              float wave2 = sin(uFxTime * beatFreq * 2.5 + displacedCenter.y * 15.0 + displacedCenter.x * 10.0);
-              float spikyWave = wave1 + (wave2 * flangerAmount * 1.5);
-              displacedCenter *= (1.0 + spikyWave * flangerAmount * 0.4);
+              vec3 p = displacedCenter * 5.0;
+              vec3 cell = floor(p);
+              vec3 frac = fract(p);
+              vec3 jitter = sin(cell * 11.45 + uFxTime * beatFreq * 2.0) * 0.45;
+              float dist = length(frac - (0.5 + jitter));
+              float voronoiNoise = smoothstep(0.0, 0.8, dist);
+              displacedCenter *= (1.0 + voronoiNoise * flangerAmount * 0.6);
+          }
+          
+          // Apply Phaser
+          float phaserAmount = 0.0;
+          if (isDeckA) {
+              if (uFxPhaserAmountA > 0.0) phaserAmount = uFxPhaserAmountA;
+          } else {
+              if (uFxPhaserAmountB > 0.0) phaserAmount = uFxPhaserAmountB;
+          }
+          if (uFxPhaserAmountM > 0.0) phaserAmount += uFxPhaserAmountM;
+          
+          if (phaserAmount > 0.0) {
+              float spatialWaveBase = sin(displacedCenter.y * 15.0 + displacedCenter.x * 10.0 + displacedCenter.z * 5.0);
+              float sweepPhase = uFxTime * beatFreq * 3.0;
+              float spatialWaveShifted = sin(displacedCenter.y * 15.0 + displacedCenter.x * 10.0 + displacedCenter.z * 5.0 + sweepPhase);
+              float notchSum = (spatialWaveBase + spatialWaveShifted) * 0.5;
+              float phaserScale = mix(1.0, 0.5 + 0.5 * notchSum, phaserAmount);
+              displacedCenter *= phaserScale;
           }
           
           // Apply Pitch
@@ -1596,17 +1925,25 @@ async function rebuildViewerBuffers() {
           float faderScale = 1.0;
           if (isDeckA) {
               faderScale = uFaderScaleA;
+              vOpacityMult = uStrobeAlphaA;
           } else {
               faderScale = uFaderScaleB;
+              vOpacityMult = uStrobeAlphaB;
           }
           
           vec4 viewCenter = transformModelViewMatrix * vec4(displacedCenter, 1.0);
+          
+          // Apply Vertex-based Depth of Field
+          float dist = -viewCenter.z;
+          float coc = abs(dist - uDofFocus) * uDofAmount;
+          float dofScale = 1.0 + coc * 8.0;
+          vOpacityMult *= 1.0 / (1.0 + coc * coc * 12.0);
           `
         );
         
         shader = shader.replaceAll(
           'vec4 quadPos = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);',
-          'vec4 quadPos = vec4(ndcCenter.xy + ndcOffset * max(faderScale, 0.0001), ndcCenter.z, 1.0);'
+          'vec4 quadPos = vec4(ndcCenter.xy + ndcOffset * max(faderScale, 0.0001) * dofScale, ndcCenter.z, 1.0);'
         );
         
         viewer.splatMesh.material.vertexShader = shader;
@@ -1614,6 +1951,7 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uDeckAChunkCount = { value: 0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountA = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountA = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXA = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYA = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYA = { value: 1.0 };
@@ -1621,6 +1959,7 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uFxBeatFreqA = { value: 1.0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountB = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountB = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXB = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYB = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYB = { value: 1.0 };
@@ -1628,6 +1967,7 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uFxBeatFreqB = { value: 1.0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountM = { value: 0 };
+        viewer.splatMesh.material.uniforms.uFxPhaserAmountM = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashXM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchStretchYM = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFxPitchSquashYM = { value: 1.0 };
@@ -1636,7 +1976,27 @@ async function rebuildViewerBuffers() {
         
         viewer.splatMesh.material.uniforms.uFaderScaleA = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uFaderScaleB = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uStrobeAlphaA = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uStrobeAlphaB = { value: 1.0 };
+        viewer.splatMesh.material.uniforms.uDofFocus = { value: 4.5 };
+        viewer.splatMesh.material.uniforms.uDofAmount = { value: 0.0 };
         
+        let fragShader = viewer.splatMesh.material.fragmentShader;
+        if (!fragShader.includes('vOpacityMult')) {
+          fragShader = `
+            varying float vOpacityMult;
+          ` + fragShader;
+          fragShader = fragShader.replace(
+            'gl_FragColor = vec4(vColor.rgb, w);',
+            'gl_FragColor = vec4(vColor.rgb, w * vOpacityMult);'
+          );
+          fragShader = fragShader.replace(
+            'gl_FragColor = vec4(color.rgb, opacity);',
+            'gl_FragColor = vec4(color.rgb, opacity * vOpacityMult);'
+          );
+          viewer.splatMesh.material.fragmentShader = fragShader;
+        }
+
         viewer.splatMesh.material.needsUpdate = true;
       }
     }
@@ -2090,9 +2450,21 @@ async function performRealtimeUpdate() {
       uniforms.uFaderScaleA.value = Number(document.querySelector('#vol-a').value) / 100;
       uniforms.uFaderScaleB.value = Number(document.querySelector('#vol-b').value) / 100;
       
+      if (uniforms.uDofAmount) {
+        uniforms.uDofAmount.value = Number(document.getElementById('knob-dof').value) / 100;
+      }
+      if (uniforms.uDofFocus && viewer.camera) {
+        const focusDist = viewer.camera.position.distanceTo((viewer.controls && viewer.controls.target) ? viewer.controls.target : new THREE.Vector3());
+        uniforms.uDofFocus.value = focusDist;
+      }
+      if (bokehPass && bokehPass.enabled && viewer.camera && viewer.controls) {
+        bokehPass.uniforms['focus'].value = viewer.camera.position.distanceTo(viewer.controls.target);
+      }
+      
       // Deck A
       uniforms.uFxBeatFreqA.value = beatFreqA;
       uniforms.uFxFlangerAmountA.value = (fxEngagedA && fxActiveA === 'flanger') ? amountA : 0.0;
+      uniforms.uFxPhaserAmountA.value = (fxEngagedA && fxActiveA === 'phaser') ? amountA : 0.0;
       if (fxEngagedA && fxActiveA === 'pitch') {
         if (amountA > 0.5) {
           const shiftAmount = (amountA - 0.5) * 2.0;
@@ -2117,6 +2489,7 @@ async function performRealtimeUpdate() {
       // Deck B
       uniforms.uFxBeatFreqB.value = beatFreqB;
       uniforms.uFxFlangerAmountB.value = (fxEngagedB && fxActiveB === 'flanger') ? amountB : 0.0;
+      uniforms.uFxPhaserAmountB.value = (fxEngagedB && fxActiveB === 'phaser') ? amountB : 0.0;
       if (fxEngagedB && fxActiveB === 'pitch') {
         if (amountB > 0.5) {
           const shiftAmount = (amountB - 0.5) * 2.0;
@@ -2141,6 +2514,7 @@ async function performRealtimeUpdate() {
       // Master
       uniforms.uFxBeatFreqM.value = beatFreqM;
       uniforms.uFxFlangerAmountM.value = (fxEngagedM && fxActiveM === 'flanger') ? amountM : 0.0;
+      uniforms.uFxPhaserAmountM.value = (fxEngagedM && fxActiveM === 'phaser') ? amountM : 0.0;
       if (fxEngagedM && fxActiveM === 'pitch') {
         if (amountM > 0.5) {
           const shiftAmount = (amountM - 0.5) * 2.0;
@@ -2176,33 +2550,77 @@ async function performRealtimeUpdate() {
     lastRollStateB = isRollB;
 
     // Calculate strobe values
-    let maxStrobeOpacity = 0;
-    
     const isTransA = (fxEngagedA && fxActiveA === 'trans') || (fxEngagedM && fxActiveM === 'trans');
     const isTransB = (fxEngagedB && fxActiveB === 'trans') || (fxEngagedM && fxActiveM === 'trans');
     
-    let strobeOnA = true;
+    let strobeAlphaA = 1.0;
+    let isTransOn = true;
+    const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : (isTransA ? beatFreqA : beatFreqB);
+    const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq; // Strobe frequency same as beats (no * 2)
+    isTransOn = Math.sin(phase) > 0;
+    
     if (isTransA) {
-      const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqA;
       const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountA;
-      const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq * 2;
-      strobeOnA = Math.sin(phase) > (2.0 * transAmount - 1.0);
-      if (!strobeOnA) {
-        maxStrobeOpacity = Math.max(maxStrobeOpacity, transAmount * 0.45);
-      }
+      const offAlpha = Math.max(0.0, 1.0 - transAmount);
+      strobeAlphaA = isTransOn ? 1.0 : offAlpha;
     }
     
-    let strobeOnB = true;
+    let strobeAlphaB = 1.0;
     if (isTransB) {
-      const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : beatFreqB;
       const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountB;
-      const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq * 2;
-      strobeOnB = Math.sin(phase) > (2.0 * transAmount - 1.0);
-      if (!strobeOnB) {
-        maxStrobeOpacity = Math.max(maxStrobeOpacity, transAmount * 0.45);
-      }
+      const offAlpha = Math.max(0.0, 1.0 - transAmount);
+      strobeAlphaB = isTransOn ? 1.0 : offAlpha;
     }
     
+    if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uStrobeAlphaA) {
+      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaA;
+      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB;
+    }
+    
+    // Background sequencer strobe (strips around edges)
+    if (!document.getElementById('seq-t')) {
+      const seqStyle = "position:absolute; background:white; opacity:0; pointer-events:none; z-index:10; box-shadow:0 0 80px 40px white; transition:opacity 0.05s ease-out; mix-blend-mode:screen;";
+      const createBlock = (id, props) => {
+        const el = document.createElement('div');
+        el.id = id;
+        el.style.cssText = seqStyle + props;
+        const parent = document.getElementById('viewer-container') || document.body;
+        parent.appendChild(el);
+      };
+      createBlock('seq-t', 'top:0; left:0; width:100vw; height:3vh;');
+      createBlock('seq-r', 'top:0; right:0; width:3vh; height:100vh;');
+      createBlock('seq-b', 'bottom:0; left:0; width:100vw; height:3vh;');
+      createBlock('seq-l', 'top:0; left:0; width:3vh; height:100vh;');
+    }
+
+    const anyTransActive = isTransA || isTransB;
+    if (anyTransActive) {
+      const globalSeqPhase = Math.floor((Date.now() * 0.001 * transFreq)) % 4; // Freq same as beats
+      const overallTransAmount = Math.max(
+        (fxEngagedA && fxActiveA === 'trans') ? amountA : 0,
+        (fxEngagedB && fxActiveB === 'trans') ? amountB : 0,
+        (fxEngagedM && fxActiveM === 'trans') ? amountM : 0
+      );
+      
+      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+      seqBlocks.forEach((id, idx) => {
+        const el = document.getElementById(id);
+        if (el) {
+          if (idx === globalSeqPhase && isTransOn) { // Strobe on beat
+            el.style.opacity = overallTransAmount * 0.95;
+          } else {
+            el.style.opacity = 0;
+          }
+        }
+      });
+    } else {
+      const seqBlocks = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+      seqBlocks.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.opacity = 0;
+      });
+    }
+
     const strobeOverlayEl = document.getElementById('strobe-overlay');
     if (strobeOverlayEl) {
       // strobeOverlayEl.style.opacity = maxStrobeOpacity; // Removed bg strobe as requested
@@ -2242,10 +2660,6 @@ async function performRealtimeUpdate() {
       
       currentScalesA[i] += (targetScaleFactor - currentScalesA[i]) * 0.15;
       splatScene.visible = isPlaying ? targetVisible : (currentScalesA[i] > 0.01);
-      
-      if (!strobeOnA) {
-        splatScene.visible = false;
-      }
       
       const scaleA = targetDist / boundsA.maxDist;
       const activeScale = Math.max(0.0001, currentScalesA[i] * scaleA * beatScaleMult);
@@ -2298,10 +2712,6 @@ async function performRealtimeUpdate() {
       
       currentScalesB[i] += (targetScaleFactor - currentScalesB[i]) * 0.15;
       splatScene.visible = isPlaying ? targetVisible : (currentScalesB[i] > 0.01);
-      
-      if (!strobeOnB) {
-        splatScene.visible = false;
-      }
       
       const scaleB = targetDist / boundsB.maxDist;
       const activeScale = Math.max(0.0001, currentScalesB[i] * scaleB * beatScaleMult);
