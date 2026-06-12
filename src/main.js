@@ -811,10 +811,10 @@ let currentHdriTexture = null;
 let currentHdriEnv = null;
 const hdriPresets = {
   none: null,
-  studio: '/hdri/studio.hdr',
-  sunset: '/hdri/sunset.hdr',
-  night:  '/hdri/night.hdr',
-  forest: '/hdri/forest.hdr',
+  studio: 'hdri/studio.hdr',
+  sunset: 'hdri/sunset.hdr',
+  night:  'hdri/night.hdr',
+  forest: 'hdri/forest.hdr',
 };
 
 async function loadHdriFromUrl(url) {
