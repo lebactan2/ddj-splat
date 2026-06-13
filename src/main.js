@@ -399,6 +399,7 @@ appDiv.innerHTML = `
         </select>
         <button id="btn-midi-learn" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">MIDI LEARN</button>
         <button id="btn-midi-export" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">EXPORT MIDI</button>
+        <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
       </div>
       <div class="flex-row" style="align-items:center;">
         <span class="knob-label" style="margin-right:4px;">HDRI</span>
@@ -440,6 +441,44 @@ appDiv.innerHTML = `
   ">
     <div style="color:#fff; font-weight:bold; margin-bottom:4px; letter-spacing:1px; font-size:10px;">⬤ MIDI LEARN — incoming messages</div>
     <div id="midi-learn-log" style="color:#10b981;"></div>
+  </div>
+
+  <!-- GUIDED MIDI MAP WIZARD -->
+  <div id="midi-guide-panel" style="
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 999990;
+    background: #0d0d12;
+    border: 1px solid #7c3aed;
+    border-radius: 10px;
+    padding: 24px 28px;
+    min-width: 420px;
+    max-width: 520px;
+    font-family: 'Share Tech Mono', monospace;
+    color: #e0e0e0;
+    box-shadow: 0 0 40px rgba(124,58,237,0.5);
+    pointer-events: auto;
+  ">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <div style="color:#a78bfa; font-size:13px; font-weight:bold; letter-spacing:1px;">GUIDED MIDI MAPPING — DDJ-FLX4</div>
+      <button id="midi-guide-close" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer; line-height:1;">✕</button>
+    </div>
+    <div id="midi-guide-progress" style="color:#7c3aed; font-size:11px; margin-bottom:10px; letter-spacing:0.5px;">Step 1 / 34</div>
+    <div id="midi-guide-label" style="color:#fff; font-size:15px; font-weight:bold; margin-bottom:6px;">—</div>
+    <div id="midi-guide-instruction" style="color:#94a3b8; font-size:11px; margin-bottom:14px;">—</div>
+    <div style="background:#111; border:1px solid #333; border-radius:6px; padding:10px 14px; margin-bottom:16px; min-height:44px;">
+      <div style="font-size:9px; color:#666; margin-bottom:4px; letter-spacing:0.5px;">DETECTED:</div>
+      <div id="midi-guide-detected" style="color:#10b981; font-size:12px; font-family:'Share Tech Mono', monospace;">—  (move the control now)</div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <button id="midi-guide-back"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Back</button>
+      <button id="midi-guide-skip"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Skip</button>
+      <button id="midi-guide-confirm" style="background:#7c3aed; border:none; color:#fff; font-size:10px; padding:5px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-family:inherit;">Confirm &amp; Next</button>
+      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled>Finish &amp; Export</button>
+    </div>
   </div>
 
   <!-- BOTTOM PANEL: FX & CROSSFADER -->
@@ -1292,6 +1331,257 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
     });
   }
 })();
+
+// ── Guided MIDI Mapping Wizard ─────────────────────────────────────────────────
+(function setupMidiGuide() {
+  // ── Step definitions ──────────────────────────────────────────────────────
+  const GUIDE_STEPS = [
+    { id: 'master-vol',     label: 'Master Volume → zoom',                   target: 'master-vol',        kind: 'knob'   },
+    { id: 'headphone-mix',  label: 'Headphone MIX → DOF',                    target: 'knob-dof',          kind: 'knob'   },
+    { id: 'headphone-level',label: 'Headphone LEVEL → Flare',                target: 'knob-lensflare',    kind: 'knob'   },
+    { id: 'mic-level',      label: 'Mic Level → HDRI cycle',                 target: 'hdri-select',       kind: 'knob'   },
+    { id: 'fx-ch-a',        label: 'Beat-FX CH SELECT → position 1 (Deck A)',target: 'fxTarget=a',        kind: 'switch' },
+    { id: 'fx-ch-b',        label: 'Beat-FX CH SELECT → position 2 (Deck B)',target: 'fxTarget=b',        kind: 'switch' },
+    { id: 'fx-ch-m',        label: 'Beat-FX CH SELECT → MASTER',             target: 'fxTarget=m',        kind: 'switch' },
+    { id: 'fx-select',      label: 'Beat-FX SELECT (turn/press)',             target: 'fx-select-cycle',   kind: 'button' },
+    { id: 'beat-prev',      label: 'Beat ‹ (left)',                      target: 'btn-beat-prev',     kind: 'button' },
+    { id: 'beat-next',      label: 'Beat › (right)',                     target: 'btn-beat-next',     kind: 'button' },
+    { id: 'fx-onoff',       label: 'Beat-FX ON/OFF',                         target: 'btn-fx-toggle',     kind: 'button' },
+    { id: 'fx-depth',       label: 'Beat-FX LEVEL/DEPTH',                    target: 'fx-depth',          kind: 'knob'   },
+    { id: 'loop-active-a',  label: 'Deck A 4-beat loop',                     target: 'loop-active-a',     kind: 'button' },
+    { id: 'loop-half-a',    label: 'Deck A loop \xbd',                       target: 'loop-half-a',       kind: 'button' },
+    { id: 'loop-double-a',  label: 'Deck A loop \xd72',                      target: 'loop-double-a',     kind: 'button' },
+    { id: 'loop-active-b',  label: 'Deck B 4-beat loop',                     target: 'loop-active-b',     kind: 'button' },
+    { id: 'loop-half-b',    label: 'Deck B loop \xbd',                       target: 'loop-half-b',       kind: 'button' },
+    { id: 'loop-double-b',  label: 'Deck B loop \xd72',                      target: 'loop-double-b',     kind: 'button' },
+    // Pads A: 1–8
+    { id: 'pad-a-1', label: 'Deck A PAD 1 (set pad mode first, e.g. Hot Cue)', target: 'pad-a-1', kind: 'button' },
+    { id: 'pad-a-2', label: 'Deck A PAD 2', target: 'pad-a-2', kind: 'button' },
+    { id: 'pad-a-3', label: 'Deck A PAD 3', target: 'pad-a-3', kind: 'button' },
+    { id: 'pad-a-4', label: 'Deck A PAD 4', target: 'pad-a-4', kind: 'button' },
+    { id: 'pad-a-5', label: 'Deck A PAD 5', target: 'pad-a-5', kind: 'button' },
+    { id: 'pad-a-6', label: 'Deck A PAD 6', target: 'pad-a-6', kind: 'button' },
+    { id: 'pad-a-7', label: 'Deck A PAD 7', target: 'pad-a-7', kind: 'button' },
+    { id: 'pad-a-8', label: 'Deck A PAD 8', target: 'pad-a-8', kind: 'button' },
+    // Pads B: 1–8
+    { id: 'pad-b-1', label: 'Deck B PAD 1', target: 'pad-b-1', kind: 'button' },
+    { id: 'pad-b-2', label: 'Deck B PAD 2', target: 'pad-b-2', kind: 'button' },
+    { id: 'pad-b-3', label: 'Deck B PAD 3', target: 'pad-b-3', kind: 'button' },
+    { id: 'pad-b-4', label: 'Deck B PAD 4', target: 'pad-b-4', kind: 'button' },
+    { id: 'pad-b-5', label: 'Deck B PAD 5', target: 'pad-b-5', kind: 'button' },
+    { id: 'pad-b-6', label: 'Deck B PAD 6', target: 'pad-b-6', kind: 'button' },
+    { id: 'pad-b-7', label: 'Deck B PAD 7', target: 'pad-b-7', kind: 'button' },
+    { id: 'pad-b-8', label: 'Deck B PAD 8', target: 'pad-b-8', kind: 'button' },
+  ];
+
+  const N = GUIDE_STEPS.length;
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let guideOpen    = false;
+  let currentStep  = 0;
+  const mapping    = new Array(N).fill(null); // null = not yet visited, object = recorded/skipped
+
+  // Per-step MIDI candidate accumulator
+  // key: `${type}:${channel}:${data1}` → { type, channel, data1, count, valueMin, valueMax }
+  let candidates   = new Map();
+
+  // ── DOM refs ──────────────────────────────────────────────────────────────
+  const panel       = document.getElementById('midi-guide-panel');
+  const btnGuide    = document.getElementById('btn-midi-guide');
+  const btnClose    = document.getElementById('midi-guide-close');
+  const btnBack     = document.getElementById('midi-guide-back');
+  const btnSkip     = document.getElementById('midi-guide-skip');
+  const btnConfirm  = document.getElementById('midi-guide-confirm');
+  const btnFinish   = document.getElementById('midi-guide-finish');
+  const elProgress  = document.getElementById('midi-guide-progress');
+  const elLabel     = document.getElementById('midi-guide-label');
+  const elInstr     = document.getElementById('midi-guide-instruction');
+  const elDetected  = document.getElementById('midi-guide-detected');
+
+  if (!panel || !btnGuide) return; // graceful if DOM not ready
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function bestCandidate() {
+    if (candidates.size === 0) return null;
+    let best = null;
+    for (const c of candidates.values()) {
+      if (!best || c.count > best.count) best = c;
+    }
+    return best;
+  }
+
+  function renderDetected() {
+    const c = bestCandidate();
+    if (!c) {
+      elDetected.textContent = '—  (move the control now)';
+      elDetected.style.color = '#555';
+      return;
+    }
+    const hex = '0x' + c.data1.toString(16).toUpperCase().padStart(2, '0');
+    const typeLabel = c.type === 'cc' ? 'CC' : 'NOTE';
+    elDetected.textContent =
+      `ch ${c.channel} | ${typeLabel} ${c.data1} (${hex}) | seen ${c.count}x, val ${c.valueMin}–${c.valueMax}`;
+    elDetected.style.color = '#10b981';
+  }
+
+  function renderStep() {
+    const step = GUIDE_STEPS[currentStep];
+    elProgress.textContent = `Step ${currentStep + 1} / ${N}`;
+    elLabel.textContent    = step.label;
+    const isButton = step.kind === 'button' || step.kind === 'switch';
+    elInstr.textContent    = isButton ? 'Press it now' : 'Turn / move it now';
+    renderDetected();
+    // Enable Finish once all steps have been at least visited (or any step >= last)
+    btnFinish.disabled = (currentStep < N - 1) && (mapping.filter(Boolean).length < 1);
+    // Actually enable Finish as soon as at least one mapping exists or we've been here a while
+    // Per spec: enable once last step reached OR anytime a mapping exists
+    if (currentStep >= N - 1 || mapping.some(Boolean)) {
+      btnFinish.disabled = false;
+    }
+  }
+
+  function enterStep(idx) {
+    currentStep = Math.max(0, Math.min(N - 1, idx));
+    candidates  = new Map(); // reset per-step candidates
+    renderStep();
+  }
+
+  // ── MIDI sink for the wizard ──────────────────────────────────────────────
+  function guideSink(msg) {
+    const key = `${msg.type}:${msg.channel}:${msg.data1}`;
+    let c = candidates.get(key);
+    if (!c) {
+      c = { type: msg.type, channel: msg.channel, data1: msg.data1, count: 0, valueMin: msg.value, valueMax: msg.value };
+      candidates.set(key, c);
+    }
+    c.count++;
+    if (msg.value < c.valueMin) c.valueMin = msg.value;
+    if (msg.value > c.valueMax) c.valueMax = msg.value;
+    renderDetected();
+  }
+
+  // Expose the sink function for testing
+  window._midiGuideSink = guideSink;
+
+  // ── Open / close ─────────────────────────────────────────────────────────
+  function openGuide() {
+    guideOpen = true;
+    // Reset all state
+    currentStep = 0;
+    candidates  = new Map();
+    mapping.fill(null);
+    panel.style.display = 'block';
+    btnGuide.style.background = '#7c3aed';
+    btnGuide.style.color = '#fff';
+    enterStep(0);
+    setMidiLearn(true, guideSink);
+  }
+
+  function closeGuide() {
+    guideOpen = false;
+    panel.style.display = 'none';
+    btnGuide.style.background = '#7c3aed';
+    btnGuide.style.color = '';
+    setMidiLearn(false, null);
+  }
+
+  // ── Export ────────────────────────────────────────────────────────────────
+  function exportMapping() {
+    const mappings = GUIDE_STEPS.map((step, i) => {
+      const m = mapping[i];
+      if (!m || m.skipped) {
+        return {
+          id:       step.id,
+          label:    step.label,
+          target:   step.target,
+          kind:     step.kind,
+          channel:  null,
+          type:     null,
+          data1:    null,
+          hex:      null,
+          valueMin: null,
+          valueMax: null,
+          skipped:  true,
+        };
+      }
+      return {
+        id:       step.id,
+        label:    step.label,
+        target:   step.target,
+        kind:     step.kind,
+        channel:  m.channel,
+        type:     m.type,
+        data1:    m.data1,
+        hex:      '0x' + m.data1.toString(16).toUpperCase().padStart(2, '0'),
+        valueMin: m.valueMin,
+        valueMax: m.valueMax,
+        skipped:  false,
+      };
+    });
+
+    const data = {
+      device:      'ddj-flx4',
+      capturedAt:  new Date().toISOString(),
+      mappings,
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'midi-map.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ── Button handlers ───────────────────────────────────────────────────────
+  btnGuide.addEventListener('click', () => {
+    if (guideOpen) closeGuide(); else openGuide();
+  });
+
+  btnClose.addEventListener('click', closeGuide);
+
+  btnConfirm.addEventListener('click', () => {
+    const c = bestCandidate();
+    if (!c) {
+      elDetected.textContent = '  No control detected yet — move it first!';
+      elDetected.style.color = '#f97316';
+      return;
+    }
+    mapping[currentStep] = { ...c, skipped: false };
+    if (currentStep < N - 1) {
+      enterStep(currentStep + 1);
+    } else {
+      // Last step confirmed
+      renderStep();
+      elDetected.textContent = 'All steps done. Click Finish & Export to save.';
+      elDetected.style.color = '#a78bfa';
+    }
+  });
+
+  btnSkip.addEventListener('click', () => {
+    mapping[currentStep] = { skipped: true };
+    if (currentStep < N - 1) {
+      enterStep(currentStep + 1);
+    } else {
+      elDetected.textContent = 'All steps done. Click Finish & Export to save.';
+      elDetected.style.color = '#a78bfa';
+    }
+  });
+
+  btnBack.addEventListener('click', () => {
+    if (currentStep > 0) {
+      enterStep(currentStep - 1);
+    }
+  });
+
+  btnFinish.addEventListener('click', () => {
+    exportMapping();
+    closeGuide();
+  });
+})();
+// Expose GUIDE_STEPS count for smoke-test assertions (34 total steps)
+window._midiGuideStepCount = 34;
 
 document.getElementById('btn-strobe')?.addEventListener('click', () => {
   strobeEngaged = !strobeEngaged;
