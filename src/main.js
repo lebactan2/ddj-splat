@@ -5,7 +5,7 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
-import { initMIDI } from './midi.js';
+import { initMIDI, setMidiProfile } from './midi.js';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -63,6 +63,16 @@ let composer = null;
 let bokehPass = null;
 let afterimagePass = null;
 let lensflareLight = null;
+
+// WebGL screen-space strobe overlay (rendered between HDRI background and splats).
+// Built lazily in setupPostProcessingAndLensFlare; driven by uniforms in performRealtimeUpdate.
+let strobeScene = null;
+let strobeCamera = null;
+let strobeMaterial = null;
+// Mirrors the uniform strength so the render pass can skip the draw entirely when off (zero FPS cost).
+let strobeStrength = 0;
+let strobeUMode = 0;
+let strobeUEdge = 0;
 
 let sceneA = null;
 let sceneB = null;
@@ -192,9 +202,6 @@ let beatIndexM = 4;
 
 let strobeEngaged = false;
 let strobeMode = 'side';
-// Cached strobe DOM elements (populated once the lazy seq blocks are created)
-let seqBlockEls = null;
-let strobeOverlayElCached = null;
 
 const beatDivisions = ["1/32", "1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8", "16", "32"];
 let lastRollStateA = false;
@@ -205,10 +212,7 @@ let lastRollStateD = false;
 // ── Inject DDJ-400 UI ──────────────────────────────────
 const appDiv = document.querySelector('#app');
 appDiv.innerHTML = `
-  <div id="strobe-layer" style="position:absolute; inset:0; z-index:0; background:#050508; pointer-events:none; overflow:hidden;">
-    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
-  </div>
-  <div id="viewer-container" style="position:absolute; inset:0; z-index:1;"></div>
+  <div id="viewer-container" style="position:absolute; inset:0; z-index:1; background:#050508;"></div>
   
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
   <div class="hud-panel panel-left" id="deck-a">
@@ -379,18 +383,19 @@ appDiv.innerHTML = `
       <input type="text" id="colab-url" placeholder="loca.lt URL..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:100px; box-sizing:border-box;">
     </div>
     
-    <div class="flex-row" style="gap:12px; margin-left:auto;">
-      <div class="knob-cell" style="flex-direction:row;">
-        <span class="knob-label">DOF</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-dof">
-      </div>
-      <div class="knob-cell" style="flex-direction:row;">
-        <span class="knob-label">FLARE</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-lensflare">
-      </div>
+    <div class="flex-row" style="gap:10px; margin-left:auto;">
       <div class="flex-row" style="align-items:center; gap:4px;">
         <button id="btn-strobe" class="util-btn" style="font-size:9px; padding:2px 5px;">STROBE</button>
         <select id="strobe-mode" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
           <option value="side">SIDE</option>
           <option value="full">FULL</option>
+        </select>
+      </div>
+      <div class="flex-row" style="align-items:center; gap:4px;">
+        <span class="knob-label" style="margin-right:4px;">MIDI</span>
+        <select id="midi-device" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
+          <option value="ddj-400">DDJ-400</option>
+          <option value="ddj-flx4">DDJ-FLX4</option>
         </select>
       </div>
       <div class="flex-row" style="align-items:center;">
@@ -457,6 +462,14 @@ appDiv.innerHTML = `
         <div class="flex-row" style="gap:4px;">
           <span style="font-size:9px; font-weight:bold; color:#888;">MST VOL</span>
           <input type="range" min="0" max="100" value="80" class="knob knob-small" id="master-vol">
+        </div>
+      </div>
+      <div class="flex-row" style="gap:12px; align-items:center; justify-content:center;">
+        <div class="knob-cell" style="flex-direction:row;">
+          <span class="knob-label">DOF</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-dof">
+        </div>
+        <div class="knob-cell" style="flex-direction:row;">
+          <span class="knob-label">FLARE</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-lensflare">
         </div>
       </div>
     </div>
@@ -806,40 +819,49 @@ async function toggleOutputWindow() {
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; background:#000; overflow:hidden; cursor:none; }
-    #strobe-layer { position:absolute; inset:0; z-index:0; pointer-events:none; overflow:hidden; background:#050508; }
-    video { display:block; position:absolute; inset:0; z-index:1; width:100vw; height:100vh; object-fit:contain; background:transparent; pointer-events:none; }
+    :fullscreen, :-webkit-full-screen, :fullscreen video, :-webkit-full-screen video { cursor:none !important; }
+    video { display:block; position:absolute; inset:0; z-index:1; width:100vw; height:100vh; object-fit:contain; background:#050508; pointer-events:none; }
   </style>
 </head>
 <body>
-  <div id="strobe-layer">
-    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
-    <div id="seq-t" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"></div>
-    <div id="seq-r" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; right:0; width:30vw; height:100vh; background: linear-gradient(to left, #fff 0%, #fff 10%, transparent 100%);"></div>
-    <div id="seq-b" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); bottom:0; left:0; width:100vw; height:34vh; background: linear-gradient(to top, #fff 0%, #fff 10%, transparent 100%);"></div>
-    <div id="seq-l" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:30vw; height:100vh; background: linear-gradient(to right, #fff 0%, #fff 10%, transparent 100%);"></div>
-  </div>
+  <!-- Strobe is now baked into the captured WebGL frame, so no DOM strobe layer is needed here. -->
   <video id="vjvideo" autoplay muted playsinline></video>
   <script>
-    const video = document.getElementById('vjvideo');
     function goFullscreen() {
-      if (document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen().catch(()=>{});
-      } else if (document.documentElement.webkitRequestFullscreen) {
-        document.documentElement.webkitRequestFullscreen();
+      var el = document.documentElement;
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(function(){});
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
       }
     }
     window.addEventListener('click', goFullscreen);
-    video.addEventListener('dblclick', goFullscreen);
-    document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'f') goFullscreen(); });
-    window.onload = () => {
-      window.moveTo(0,0);
-      window.resizeTo(screen.availWidth, screen.availHeight);
-      setTimeout(goFullscreen, 100);
-    };
+    document.addEventListener('keydown', function(e) { if (e.key.toLowerCase() === 'f') goFullscreen(); });
   <\/script>
 </body>
 </html>`);
   outputWin.document.close();
+
+  // Primary fullscreen trigger: use the opener's click gesture (user activation)
+  // which is propagated to the popup, satisfying the browser's user-gesture requirement.
+  if (outputWin && outputWin.document && outputWin.document.documentElement) {
+    const el = outputWin.document.documentElement;
+    try {
+      // Prefer multi-screen form so the browser places it on the right screen
+      if (targetScreen && typeof el.requestFullscreen === 'function') {
+        el.requestFullscreen({ screen: targetScreen }).catch(() => {
+          el.requestFullscreen().catch(() => {});
+        });
+      } else if (typeof el.requestFullscreen === 'function') {
+        el.requestFullscreen().catch(() => {});
+      } else if (typeof el.webkitRequestFullscreen === 'function') {
+        el.webkitRequestFullscreen();
+      }
+    } catch (e) {
+      // Fullscreen denied — popup's own click/F-key handlers remain as fallback
+      console.warn('Output window auto-fullscreen failed:', e);
+    }
+  }
 
   // Attach the stream to the video element
   const attachStream = () => {
@@ -1151,6 +1173,10 @@ async function setHdri(preset) {
 
 document.getElementById('hdri-select')?.addEventListener('change', (e) => {
   setHdri(e.target.value);
+});
+
+document.getElementById('midi-device')?.addEventListener('change', (e) => {
+  setMidiProfile(e.target.value);
 });
 
 document.getElementById('btn-strobe')?.addEventListener('click', () => {
@@ -2132,7 +2158,62 @@ function setupPostProcessingAndLensFlare() {
   const height = window.innerHeight;
 
   composer = new EffectComposer(viewer.renderer);
-  
+
+  // ── Build the screen-space strobe overlay (once) ──────────────────────────
+  // A single full-screen quad with a transparent ShaderMaterial. It is drawn
+  // INSIDE the render pass, after the HDRI/threeScene background and before the
+  // splats, so the render order is: HDRI background -> strobe overlay -> splats.
+  if (!strobeScene) {
+    strobeScene = new THREE.Scene();
+    strobeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    strobeMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uStrength: { value: 0 },      // 0..1 opacity
+        uMode: { value: 0 },          // 0 = side gradient, 1 = full flash
+        uEdge: { value: 0 },          // 0=top, 1=right, 2=bottom, 3=left
+        uColor: { value: new THREE.Vector3(1, 1, 1) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2 vUv;
+        uniform float uStrength;
+        uniform float uMode;
+        uniform float uEdge;
+        uniform vec3 uColor;
+        void main() {
+          // PlaneGeometry UVs: (0,0) bottom-left, (1,1) top-right, so vUv.y=1 is screen top.
+          if (uMode > 0.5) {
+            // FULL mode: uniform white flash across the whole screen.
+            gl_FragColor = vec4(uColor, uStrength);
+          } else {
+            // SIDE mode: gradient that is max at the active edge, fading to the opposite edge.
+            float t;
+            if (uEdge < 0.5)       t = vUv.y;            // top edge: max at vUv.y=1
+            else if (uEdge < 1.5)  t = vUv.x;            // right edge: max at vUv.x=1
+            else if (uEdge < 2.5)  t = 1.0 - vUv.y;      // bottom edge: max at vUv.y=0
+            else                   t = 1.0 - vUv.x;      // left edge: max at vUv.x=0
+            // Soft, pleasant falloff toward the opposite edge.
+            float a = uStrength * pow(clamp(t, 0.0, 1.0), 0.6);
+            gl_FragColor = vec4(uColor, a);
+          }
+        }
+      `,
+    });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), strobeMaterial);
+    quad.frustumCulled = false;
+    strobeScene.add(quad);
+  }
+
   const renderPass = {
     enabled: true,
     needsSwap: true,
@@ -2147,6 +2228,18 @@ function setupPostProcessingAndLensFlare() {
 
       if (viewer.threeScene) {
         renderer.render(viewer.threeScene, viewer.camera);
+      }
+
+      // Strobe overlay: composites over the HDRI/background (autoClear is already
+      // false here, so the background is preserved) and the splats draw on top.
+      // FPS: skipped entirely when strength is ~0, so strobe-off costs nothing.
+      // When on it is a single cheap full-screen quad (cheaper than the old
+      // full-viewport filter:blur(48px) DOM gradient divs).
+      if (strobeMaterial && strobeStrength > 0.001) {
+        strobeMaterial.uniforms.uStrength.value = strobeStrength;
+        strobeMaterial.uniforms.uMode.value = strobeUMode;
+        strobeMaterial.uniforms.uEdge.value = strobeUEdge;
+        renderer.render(strobeScene, strobeCamera);
       }
 
       if (viewer.splatMesh) {
@@ -3040,61 +3133,25 @@ async function performRealtimeUpdate() {
       viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB * crossGainB;
     }
     
-    // Background sequencer strobe (rectangle sequencer with gradients)
-    if (!seqBlockEls) {
-      // Soft, blurred edge gradients that melt into the dark background rather
-      // than reading as hard white rectangles.
-      const seqStyle = "position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px);";
-      const createBlock = (id, props) => {
-        const el = document.createElement('div');
-        el.id = id; el.style.cssText = seqStyle + props;
-        const parent = document.getElementById('strobe-layer') || document.getElementById('viewer-container') || document.body;
-        parent.appendChild(el);
-        return el;
-      };
-      // White is solid at the screen edge (a short plateau) then fades inward,
-      // so the blur softens only the inner falloff and the peak stays at the edge.
-      seqBlockEls = [
-        createBlock('seq-t', "top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"),
-        createBlock('seq-r', "top:0; right:0; width:30vw; height:100vh; background: linear-gradient(to left, #fff 0%, #fff 10%, transparent 100%);"),
-        createBlock('seq-b', "bottom:0; left:0; width:100vw; height:34vh; background: linear-gradient(to top, #fff 0%, #fff 10%, transparent 100%);"),
-        createBlock('seq-l', "top:0; left:0; width:30vw; height:100vh; background: linear-gradient(to right, #fff 0%, #fff 10%, transparent 100%);"),
-      ];
-    }
-
-    // STROBE control drives background sequencer (independent of Trans)
-    if (!strobeOverlayElCached) strobeOverlayElCached = document.getElementById('strobe-overlay');
-    const strobeOverlay = strobeOverlayElCached;
+    // STROBE control drives the WebGL screen-space strobe overlay (independent of Trans).
+    // The overlay renders inside the composer pass between the HDRI background and
+    // the splats; here we only update the driving values. When off we set strength
+    // to 0 so the pass skips the overlay draw entirely (zero added FPS cost).
     if (strobeEngaged) {
       const bpm = Math.max(bpmA, bpmB) || 120;
       const beatPhase = (now * 0.001) * (bpm / 60);
       if (strobeMode === 'side') {
-        // Hide full-screen overlay
-        if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
-        // Cycle 4 edge gradient blocks one per beat
-        const globalSeqPhase = Math.floor(beatPhase) % 4;
-        for (let s = 0; s < seqBlockEls.length; s++) {
-          const el = seqBlockEls[s];
-          if (el) el.style.opacity = (s === globalSeqPhase) ? 0.6 : 0;
-        }
+        // SIDE mode: one edge gradient cycles per beat (top->right->bottom->left).
+        strobeUMode = 0;
+        strobeUEdge = Math.floor(beatPhase) % 4;
+        strobeStrength = 0.6;
       } else {
-        // full mode: hide edge blocks, flash full-screen overlay on beat
-        for (let s = 0; s < seqBlockEls.length; s++) {
-          const el = seqBlockEls[s];
-          if (el) el.style.opacity = 0;
-        }
-        if (strobeOverlay) {
-          strobeOverlay.style.mixBlendMode = 'normal';
-          strobeOverlay.style.opacity = (Math.sin(beatPhase * Math.PI * 2) > 0) ? 0.9 : 0;
-        }
+        // FULL mode: uniform white flash on the on-beat half of the cycle.
+        strobeUMode = 1;
+        strobeStrength = (Math.sin(beatPhase * Math.PI * 2) > 0) ? 0.9 : 0;
       }
     } else {
-      // Off: clear all seq blocks and overlay
-      for (let s = 0; s < seqBlockEls.length; s++) {
-        const el = seqBlockEls[s];
-        if (el) el.style.opacity = 0;
-      }
-      if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
+      strobeStrength = 0;
     }
 
     // Process Delay/Echo with 2D Feedback Post-processing
@@ -3135,29 +3192,9 @@ async function performRealtimeUpdate() {
       }
     }
 
-    const strobeOverlayEl = strobeOverlayElCached;
-    if (strobeOverlayEl) {
-      // strobeOverlayEl.style.opacity = maxStrobeOpacity; // Removed bg strobe as requested
-    }
-
-    if (outputWin && !outputWin.closed) {
-      try {
-        const outStrobeOverlay = outputWin.document.getElementById('strobe-overlay');
-        if (outStrobeOverlay && strobeOverlayElCached) {
-          outStrobeOverlay.style.opacity = strobeOverlayElCached.style.opacity;
-          outStrobeOverlay.style.mixBlendMode = strobeOverlayElCached.style.mixBlendMode;
-        }
-        const outSeqs = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
-        for (let s = 0; s < 4; s++) {
-          const outEl = outputWin.document.getElementById(outSeqs[s]);
-          if (outEl && seqBlockEls && seqBlockEls[s]) {
-            outEl.style.opacity = seqBlockEls[s].style.opacity;
-          }
-        }
-      } catch (e) {
-        // Output window might be inaccessible or closed
-      }
-    }
+    // NOTE: The strobe is now part of the rendered/captured WebGL frame, so the
+    // output window receives it automatically through the captured video stream.
+    // No DOM strobe mirroring into outputWin is needed.
 
     let sceneIdx = 0;
 
