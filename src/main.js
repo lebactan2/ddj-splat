@@ -170,6 +170,13 @@ let isScratchingB = false;
 let isScratchingC = false;
 let isScratchingD = false;
 
+// XZ nudge translation from physical jog side-ring (decays to zero each frame)
+let nudgeXA = 0, nudgeXB = 0;
+
+// DDJ Shift button state (held = extended tempo range)
+window._ddjShiftA = false;
+window._ddjShiftB = false;
+
 // Hot Cue presets (seeds)
 const hotCuesA = [42, 108, 256, 512, 1024, 2048, 4096, 8192];
 const hotCuesB = [77, 128, 320, 640, 1111, 2222, 5555, 9999];
@@ -1708,11 +1715,15 @@ let bpmA = 120.0;
 let bpmB = 120.0;
 
 function updateBPM() {
-  bpmA = 120.0 * (1 - Number(tempoA.value) / 600.0);
-  bpmB = 120.0 * (1 - Number(tempoB.value) / 600.0);
+  // Normal range ±50% (divisor 200); hold Shift for ±150% extended range (divisor ~67)
+  const rangeA = window._ddjShiftA ? 67 : 200;
+  const rangeB = window._ddjShiftB ? 67 : 200;
+  bpmA = 120.0 * (1 - Number(tempoA.value) / rangeA);
+  bpmB = 120.0 * (1 - Number(tempoB.value) / rangeB);
   bpmDispA.textContent = bpmA.toFixed(1);
   bpmDispB.textContent = bpmB.toFixed(1);
 }
+window._updateBPM = updateBPM;
 
 tempoA.addEventListener('input', () => {
   updateKnobFill(tempoA);
@@ -2001,10 +2012,6 @@ setupJogWheel(
   (delta) => {
     isScratchingA = true;
     jogAngleA += delta;
-    
-    if (Math.abs(delta) > 0.05) {
-      seedInput.value = Math.floor(Math.random() * 1000);
-    }
     triggerRealtimeUpdate();
   },
   () => {
@@ -2018,9 +2025,6 @@ setupJogWheel(
   (delta) => {
     isScratchingB = true;
     jogAngleB += delta;
-    if (Math.abs(delta) > 0.05) {
-      seedInput.value = Math.floor(Math.random() * 1000);
-    }
     triggerRealtimeUpdate();
   },
   () => {
@@ -2028,6 +2032,10 @@ setupJogWheel(
     triggerRealtimeUpdate();
   }
 );
+
+// ── MIDI jog nudge (side-ring XZ translation) ─────────
+document.querySelector('#jog-a').addEventListener('jognudge', (e) => { nudgeXA += e.detail.delta; });
+document.querySelector('#jog-b').addEventListener('jognudge', (e) => { nudgeXB += e.detail.delta; });
 
 // ── VJ Animation loop ──────────────────────────────────
 let lastTime = performance.now();
@@ -2589,8 +2597,8 @@ function setupPostProcessingAndLensFlare() {
             else if (uEdge < 1.5)  t = vUv.x;            // right edge: max at vUv.x=1
             else if (uEdge < 2.5)  t = 1.0 - vUv.y;      // bottom edge: max at vUv.y=0
             else                   t = 1.0 - vUv.x;      // left edge: max at vUv.x=0
-            // Soft, pleasant falloff toward the opposite edge.
-            float a = uStrength * pow(clamp(t, 0.0, 1.0), 0.6);
+            // Sharp falloff: bright only near the active edge, dark at center.
+            float a = uStrength * pow(clamp(t, 0.0, 1.0), 2.5);
             gl_FragColor = vec4(uColor, a);
           }
         }
@@ -3218,25 +3226,11 @@ function applyMixerSettings(splatData, settings) {
       eqFactor = settings.high;
     }
 
-    if (settings.filter < 0) {
-      const threshold = 1.0 + settings.filter;
-      if (radius > threshold) eqFactor = 0;
-    } else if (settings.filter > 0) {
-      const threshold = settings.filter;
-      if (radius < threshold) eqFactor = 0;
-    }
-
     const scaleFactor = eqFactor;
 
     view.setFloat32(base + 12, view.getFloat32(base + 12, true) * scaleFactor, true);
     view.setFloat32(base + 16, view.getFloat32(base + 16, true) * scaleFactor, true);
     view.setFloat32(base + 20, view.getFloat32(base + 20, true) * scaleFactor, true);
-
-    if (settings.trim !== 1.0) {
-      data[base + 24] = clampByte(data[base + 24] * settings.trim);
-      data[base + 25] = clampByte(data[base + 25] * settings.trim);
-      data[base + 26] = clampByte(data[base + 26] * settings.trim);
-    }
   }
 }
 
@@ -3389,8 +3383,10 @@ async function performRealtimeUpdate() {
       
       uniforms.uFaderScaleA = uniforms.uFaderScaleA || { value: 1.0 };
       uniforms.uFaderScaleB = uniforms.uFaderScaleB || { value: 1.0 };
-      uniforms.uFaderScaleA.value = Number(volAEl.value) / 100;
-      uniforms.uFaderScaleB.value = Number(volBEl.value) / 100;
+      const _filterA = document.getElementById('filter-a');
+      const _filterB = document.getElementById('filter-b');
+      uniforms.uFaderScaleA.value = _filterA ? (Number(_filterA.value) + 100) / 100 : 1.0;
+      uniforms.uFaderScaleB.value = _filterB ? (Number(_filterB.value) + 100) / 100 : 1.0;
 
       if (uniforms.uDofAmount) {
         uniforms.uDofAmount.value = dofVal;
@@ -3590,6 +3586,9 @@ async function performRealtimeUpdate() {
     const splatMesh = viewer.splatMesh;
     const sceneCount = splatMesh ? splatMesh.getSceneCount() : Infinity;
 
+    const volScaleA = Math.max(0.0001, Number(volAEl.value) / 100);
+    nudgeXA *= 0.9;
+
     // Apply fast GPU transforms and visibility to Scene A
     const totalChunksA = numChunksA + numRollChunksA;
     for (let i = 0; i < totalChunksA; i++) {
@@ -3636,10 +3635,14 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
       _scratchV.copy(boundsA.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      splatScene.scale.setScalar(finalScale);
+      splatScene.scale.setScalar(finalScale * volScaleA);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
+      splatScene.position.x += nudgeXA;
     }
+
+    const volScaleB = Math.max(0.0001, Number(volBEl.value) / 100);
+    nudgeXB *= 0.9;
 
     // Apply fast GPU transforms and visibility to Scene B
     const totalChunksB = numChunksB + numRollChunksB;
@@ -3686,11 +3689,12 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
       _scratchV.copy(boundsB.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      splatScene.scale.setScalar(finalScale);
+      splatScene.scale.setScalar(finalScale * volScaleB);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
+      splatScene.position.x += nudgeXB;
     }
-    
+
     // Apply fast GPU transforms and visibility to Scene C
     const totalChunksC = numChunksC + numRollChunksC;
     for (let i = 0; i < totalChunksC; i++) {

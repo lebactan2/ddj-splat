@@ -172,6 +172,9 @@ const PROFILES = {
         // Cue — Note 12 (0x0C) → performs Stop in the app
         if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);
 
+        // Shift button — Note 63 (0x3F): track for extended tempo range
+        if (note === 63) { window['_ddjShift' + deckStr.toUpperCase()] = (velocity > 0); if (window._updateBPM) window._updateBPM(); }
+
         // Hot Cue pads — Notes 0-7 (0x00-0x07)
         if (note >= 0 && note <= 7) {
           triggerPad(deckStr, note, velocity);
@@ -194,6 +197,11 @@ const PROFILES = {
       if (channel === 4) {
         // Beat FX On/Off — Note 71 (0x47) // TODO verify
         if (note === 71) clickButton('btn-fx-toggle-a', velocity);
+      }
+
+      // Master section (ch 6)
+      if (channel === 6) {
+        if (note === 84) clickButton('btn-strobe', velocity); // Master Cue → strobe toggle
       }
     },
 
@@ -218,8 +226,8 @@ const PROFILES = {
         // EQ Low  — CC 47 (0x2F)
         if (cc === 47) mapSlider(`eq-low-${deckStr}`, value);
 
-        // Trim/Gain — CC 36 (0x24)
-        if (cc === 36) mapSlider(`trim-${deckStr}`, value);
+        // Trim/Gain — CC 36 (0x24) → now controls chunk count
+        if (cc === 36) mapSlider(`chunks-slider-${deckStr}`, value);
 
         // Channel Fader (Vol) — CC 51 (0x33)
         if (cc === 51) mapSlider(`vol-${deckStr}`, value);
@@ -278,6 +286,9 @@ const PROFILES = {
         if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause
         if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue → Stop
 
+        // Shift button — Note 63 (0x3F): track for extended tempo range
+        if (note === 63) { window['_ddjShift' + deckStr.toUpperCase()] = (velocity > 0); if (window._updateBPM) window._updateBPM(); }
+
         // Loops (CONFIRMED via guided capture): 4-beat=77, half=81, double=83
         if (note === 77) clickButton(`loop-active-${deckStr}`, velocity);
         if (note === 81) clickButton(`loop-half-${deckStr}`, velocity);
@@ -297,11 +308,9 @@ const PROFILES = {
       // ── Beat FX section (ch4) ──
       if (channel === 4) {
         // CH-select switch → which deck the FX section controls.
-        // CONFIRMED: CH1 → note 17, CH2 → note 16. The FLX4 switch has no third
-        // note for MASTER (only 16/17 exist), so the Master FX target must be
-        // chosen on-screen (the MASTER position shares note 17 with CH1).
-        if (note === 17) flx4FxTarget = 'a';
-        if (note === 16) flx4FxTarget = 'b';
+        // Physical CH1 (note 16) = Deck A, Physical CH2 (note 17) = Deck B.
+        if (note === 16) flx4FxTarget = 'a';
+        if (note === 17) flx4FxTarget = 'b';
 
         // Beat FX ON/OFF (CONFIRMED note 71) → toggle the target deck's FX
         if (note === 71) clickButton(`btn-fx-toggle-${flx4FxTarget}`, velocity);
@@ -313,19 +322,28 @@ const PROFILES = {
         if (note === 74 && velocity > 0) clickButton(`btn-beat-prev-${flx4FxTarget}`, velocity);
         if (note === 75 && velocity > 0) clickButton(`btn-beat-next-${flx4FxTarget}`, velocity);
       }
+
+      // Master section (ch 6)
+      if (channel === 6) {
+        if (note === 84) clickButton('btn-strobe', velocity); // Master Cue → strobe toggle
+      }
     },
 
     handleCC(channel, cc, value) {
       // ── Deck controls (ch0 = A, ch1 = B) — not in guided capture; best-known. ──
       if (channel === 0 || channel === 1) {
         const deckStr = channel === 0 ? 'a' : 'b';
-        if (cc === 34) spinJog(`jog-${deckStr}`, value);        // top plate = scratch (full)
-        if (cc === 35) spinJog(`jog-${deckStr}`, value, 0.008); // side/bend ring = fine micro-nudge
+        if (cc === 34) spinJog(`jog-${deckStr}`, value);        // top plate = scratch (rotation)
+        if (cc === 35) {                                         // side/bend ring = XZ translation nudge
+          const ndelta = (value < 64 ? value : -(128 - value));
+          const jogEl = document.getElementById(`jog-${deckStr}`);
+          if (jogEl) jogEl.dispatchEvent(new CustomEvent('jognudge', { detail: { delta: ndelta * 0.003 } }));
+        }
         if (cc === 0)  mapSlider(`tempo-${deckStr}`, value);
         if (cc === 39) mapSlider(`eq-hi-${deckStr}`, value);
         if (cc === 43) mapSlider(`eq-mid-${deckStr}`, value);
         if (cc === 47) mapSlider(`eq-low-${deckStr}`, value);
-        if (cc === 36) mapSlider(`trim-${deckStr}`, value);
+        if (cc === 36) mapSlider(`chunks-slider-${deckStr}`, value); // trim → chunk count
         if (cc === 51) mapSlider(`vol-${deckStr}`, value);
       }
 
@@ -338,7 +356,17 @@ const PROFILES = {
         if (cc === 8)  mapSlider('master-vol', value);         // Master volume → zoom
         if (cc === 12) mapSlider('knob-dof', value);           // Headphone MIX → DOF
         if (cc === 13) mapSlider('knob-lensflare', value);     // Headphone LEVEL → Flare
-        if (cc === 5)  mapSelectByValue('hdri-select', value); // Mic level → HDRI scrub
+        if (cc === 5) {                                        // Mic level → HDRI scrub (presets only)
+          const hdriEl = document.getElementById('hdri-select');
+          if (hdriEl) {
+            const presetCount = Math.min(5, hdriEl.options.length); // none,sunset,studio,night,forest
+            const idx = Math.min(presetCount - 1, Math.floor(value / 127 * presetCount));
+            if (hdriEl.selectedIndex !== idx) {
+              hdriEl.selectedIndex = idx;
+              hdriEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        }
       }
 
       // ── Beat FX depth (ch4 CC2) → current target deck's FX depth ──
