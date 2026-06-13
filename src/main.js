@@ -61,7 +61,6 @@ window.makeViewer = makeViewer;
 
 let composer = null;
 let bokehPass = null;
-let radialBlurPass = null;
 let afterimagePass = null;
 let lensflareLight = null;
 
@@ -207,10 +206,8 @@ let lastRollStateD = false;
 const appDiv = document.querySelector('#app');
 appDiv.innerHTML = `
   <div id="strobe-layer" style="position:absolute; inset:0; z-index:0; background:#050508; pointer-events:none; overflow:hidden;">
-    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
     <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
   </div>
-  <div id="viewer-container"></div>
   <div id="viewer-container" style="position:absolute; inset:0; z-index:1;"></div>
   
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
@@ -809,17 +806,11 @@ async function toggleOutputWindow() {
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; background:#000; overflow:hidden; cursor:none; }
-    video {
-      display:block; width:100vw; height:100vh;
-      object-fit:contain; background:#000;
-    }
     #strobe-layer { position:absolute; inset:0; z-index:0; pointer-events:none; overflow:hidden; background:#050508; }
     video { display:block; position:absolute; inset:0; z-index:1; width:100vw; height:100vh; object-fit:contain; background:transparent; pointer-events:none; }
   </style>
 </head>
 <body>
-  <div id="strobe-layer" style="position:absolute; inset:0; z-index:1; pointer-events:none; overflow:hidden;">
-    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
   <div id="strobe-layer">
     <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
     <div id="seq-t" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"></div>
@@ -840,7 +831,6 @@ async function toggleOutputWindow() {
     window.addEventListener('click', goFullscreen);
     video.addEventListener('dblclick', goFullscreen);
     document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'f') goFullscreen(); });
-    setTimeout(goFullscreen, 100);
     window.onload = () => {
       window.moveTo(0,0);
       window.resizeTo(screen.availWidth, screen.availHeight);
@@ -2185,53 +2175,6 @@ function setupPostProcessingAndLensFlare() {
   afterimagePass.uniforms['scale'].value = 1.0;
   composer.addPass(afterimagePass);
 
-  const RadialBlurShader = {
-    uniforms: {
-      "tDiffuse": { value: null },
-      "amount": { value: 0.0 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D tDiffuse;
-      uniform float amount;
-      varying vec2 vUv;
-      void main() {
-        vec2 center = vec2(0.5, 0.5);
-        vec2 dir = vUv - center;
-        float dist = length(dir);
-        dir = normalize(dir);
-        
-        vec4 color = texture2D(tDiffuse, vUv);
-        
-        if (amount > 0.001) {
-          float samples = 12.0;
-          float blurStart = 0.2;
-          float blurFactor = smoothstep(blurStart, 0.8, dist) * amount * 0.03;
-          
-          if (blurFactor > 0.001) {
-            vec4 sum = vec4(0.0);
-            for(float i = -6.0; i <= 6.0; i++) {
-              sum += texture2D(tDiffuse, vUv + dir * (i * blurFactor / samples));
-            }
-            color = sum / 13.0;
-          }
-        }
-        
-        gl_FragColor = color;
-      }
-    `
-  };
-
-  radialBlurPass = new ShaderPass(RadialBlurShader);
-  radialBlurPass.enabled = true;
-  composer.addPass(radialBlurPass);
-
   // Final pass: copy the last buffer to screen
   const copyPass = new ShaderPass(CopyShader);
   copyPass.renderToScreen = true;
@@ -2958,9 +2901,6 @@ async function performRealtimeUpdate() {
     const amountM = Number(fxDepthM.value) / 100;
 
     const dofVal = Number(knobDof.value) / 100;
-    if (radialBlurPass) {
-      radialBlurPass.uniforms['amount'].value = dofVal;
-    }
 
     if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uFxTime) {
       const uniforms = viewer.splatMesh.material.uniforms;
@@ -3130,7 +3070,6 @@ async function performRealtimeUpdate() {
       const beatPhase = (now * 0.001) * (bpm / 60);
       if (strobeMode === 'side') {
         // Hide full-screen overlay
-        if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
         if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
         // Cycle 4 edge gradient blocks one per beat
         const globalSeqPhase = Math.floor(beatPhase) % 4;
@@ -3155,7 +3094,6 @@ async function performRealtimeUpdate() {
         const el = seqBlockEls[s];
         if (el) el.style.opacity = 0;
       }
-      if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
       if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
     }
 
