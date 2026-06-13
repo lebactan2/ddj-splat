@@ -208,8 +208,10 @@ const appDiv = document.querySelector('#app');
 appDiv.innerHTML = `
   <div id="strobe-layer" style="position:absolute; inset:0; z-index:0; background:#050508; pointer-events:none; overflow:hidden;">
     <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
+    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
   </div>
   <div id="viewer-container"></div>
+  <div id="viewer-container" style="position:absolute; inset:0; z-index:1;"></div>
   
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
   <div class="hud-panel panel-left" id="deck-a">
@@ -811,11 +813,15 @@ async function toggleOutputWindow() {
       display:block; width:100vw; height:100vh;
       object-fit:contain; background:#000;
     }
+    #strobe-layer { position:absolute; inset:0; z-index:0; pointer-events:none; overflow:hidden; background:#050508; }
+    video { display:block; position:absolute; inset:0; z-index:1; width:100vw; height:100vh; object-fit:contain; background:transparent; pointer-events:none; }
   </style>
 </head>
 <body>
   <div id="strobe-layer" style="position:absolute; inset:0; z-index:1; pointer-events:none; overflow:hidden;">
     <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
+  <div id="strobe-layer">
+    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:normal;"></div>
     <div id="seq-t" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"></div>
     <div id="seq-r" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; right:0; width:30vw; height:100vh; background: linear-gradient(to left, #fff 0%, #fff 10%, transparent 100%);"></div>
     <div id="seq-b" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); bottom:0; left:0; width:100vw; height:34vh; background: linear-gradient(to top, #fff 0%, #fff 10%, transparent 100%);"></div>
@@ -831,9 +837,15 @@ async function toggleOutputWindow() {
         document.documentElement.webkitRequestFullscreen();
       }
     }
+    window.addEventListener('click', goFullscreen);
     video.addEventListener('dblclick', goFullscreen);
     document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'f') goFullscreen(); });
     setTimeout(goFullscreen, 100);
+    window.onload = () => {
+      window.moveTo(0,0);
+      window.resizeTo(screen.availWidth, screen.availHeight);
+      setTimeout(goFullscreen, 100);
+    };
   <\/script>
 </body>
 </html>`);
@@ -3119,6 +3131,7 @@ async function performRealtimeUpdate() {
       if (strobeMode === 'side') {
         // Hide full-screen overlay
         if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
+        if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
         // Cycle 4 edge gradient blocks one per beat
         const globalSeqPhase = Math.floor(beatPhase) % 4;
         for (let s = 0; s < seqBlockEls.length; s++) {
@@ -3143,6 +3156,7 @@ async function performRealtimeUpdate() {
         if (el) el.style.opacity = 0;
       }
       if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
+      if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'normal'; }
     }
 
     // Process Delay/Echo with 2D Feedback Post-processing
