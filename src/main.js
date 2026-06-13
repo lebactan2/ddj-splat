@@ -397,8 +397,6 @@ appDiv.innerHTML = `
           <option value="ddj-400">DDJ-400</option>
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
         </select>
-        <button id="btn-midi-learn" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">MIDI LEARN</button>
-        <button id="btn-midi-export" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">EXPORT MIDI</button>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
       </div>
       <div class="flex-row" style="align-items:center;">
@@ -419,29 +417,6 @@ appDiv.innerHTML = `
     </div>
   </div>
 
-  <!-- MIDI LEARN OVERLAY: shows last 12 incoming MIDI messages -->
-  <div id="midi-learn-overlay" style="
-    display: none;
-    position: fixed;
-    bottom: 16px;
-    right: 16px;
-    z-index: 99999;
-    background: rgba(0,0,0,0.88);
-    border: 1px solid #10b981;
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 11px;
-    color: #10b981;
-    min-width: 300px;
-    max-width: 380px;
-    pointer-events: none;
-    line-height: 1.6;
-    box-shadow: 0 0 16px rgba(16,185,129,0.3);
-  ">
-    <div style="color:#fff; font-weight:bold; margin-bottom:4px; letter-spacing:1px; font-size:10px;">⬤ MIDI LEARN — incoming messages</div>
-    <div id="midi-learn-log" style="color:#10b981;"></div>
-  </div>
 
   <!-- GUIDED MIDI MAP WIZARD -->
   <div id="midi-guide-panel" style="

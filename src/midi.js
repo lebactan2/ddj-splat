@@ -114,10 +114,11 @@ function clickButton(elementId, velocity) {
  * Scale tuned to ~0.03 rad/tick — responsive without being hyperactive.
  * Increase towards 0.05 for a heavier, more physical feel; lower to 0.015 for precision.
  */
-function spinJog(elementId, midiValue) {
+function spinJog(elementId, midiValue, scale = 0.03) {
   const delta = midiValue < 64 ? midiValue : -(128 - midiValue);
-  // 0.03 rad/tick: smooth and responsive; change to taste (0.025–0.05 is the sweet spot).
-  const radianDelta = delta * 0.03;
+  // scale rad/tick. Top-plate scratch uses ~0.03 (responsive); the side/bend
+  // ring uses a much smaller scale for fine micro-nudges.
+  const radianDelta = delta * scale;
 
   const jogEl = document.getElementById(elementId);
   if (!jogEl) return;
@@ -296,13 +297,11 @@ const PROFILES = {
       // ── Beat FX section (ch4) ──
       if (channel === 4) {
         // CH-select switch → which deck the FX section controls.
-        // CONFIRMED: CH1 → note 17, CH2 → note 16.
-        // ⚠️ MASTER reported the SAME note (17) as CH1 in capture, so it can't be
-        // auto-distinguished; 18 is an educated guess. Re-capture MASTER if it
-        // doesn't switch to the Master FX target.
+        // CONFIRMED: CH1 → note 17, CH2 → note 16. The FLX4 switch has no third
+        // note for MASTER (only 16/17 exist), so the Master FX target must be
+        // chosen on-screen (the MASTER position shares note 17 with CH1).
         if (note === 17) flx4FxTarget = 'a';
         if (note === 16) flx4FxTarget = 'b';
-        if (note === 18) flx4FxTarget = 'm'; // GUESS — confirm via MIDI Learn
 
         // Beat FX ON/OFF (CONFIRMED note 71) → toggle the target deck's FX
         if (note === 71) clickButton(`btn-fx-toggle-${flx4FxTarget}`, velocity);
@@ -320,8 +319,8 @@ const PROFILES = {
       // ── Deck controls (ch0 = A, ch1 = B) — not in guided capture; best-known. ──
       if (channel === 0 || channel === 1) {
         const deckStr = channel === 0 ? 'a' : 'b';
-        if (cc === 34) spinJog(`jog-${deckStr}`, value); // jog vinyl turn
-        if (cc === 35) spinJog(`jog-${deckStr}`, value); // jog pitch turn
+        if (cc === 34) spinJog(`jog-${deckStr}`, value);        // top plate = scratch (full)
+        if (cc === 35) spinJog(`jog-${deckStr}`, value, 0.008); // side/bend ring = fine micro-nudge
         if (cc === 0)  mapSlider(`tempo-${deckStr}`, value);
         if (cc === 39) mapSlider(`eq-hi-${deckStr}`, value);
         if (cc === 43) mapSlider(`eq-mid-${deckStr}`, value);
