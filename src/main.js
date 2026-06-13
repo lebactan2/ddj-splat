@@ -806,31 +806,34 @@ async function toggleOutputWindow() {
   <title>VJ Output</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    html, body { width:100%; height:100%; background:#000; overflow:hidden; }
+    html, body { width:100%; height:100%; background:#000; overflow:hidden; cursor:none; }
     video {
       display:block; width:100vw; height:100vh;
-      object-fit:contain; background:#000; cursor:pointer;
-    }
-    #hint {
-      position:fixed; bottom:12px; left:50%; transform:translateX(-50%);
-      color:rgba(255,255,255,0.35); font-family:monospace; font-size:11px;
-      pointer-events:none; transition:opacity 1s;
+      object-fit:contain; background:#000;
     }
   </style>
 </head>
 <body>
+  <div id="strobe-layer" style="position:absolute; inset:0; z-index:1; pointer-events:none; overflow:hidden;">
+    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
+    <div id="seq-t" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"></div>
+    <div id="seq-r" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; right:0; width:30vw; height:100vh; background: linear-gradient(to left, #fff 0%, #fff 10%, transparent 100%);"></div>
+    <div id="seq-b" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); bottom:0; left:0; width:100vw; height:34vh; background: linear-gradient(to top, #fff 0%, #fff 10%, transparent 100%);"></div>
+    <div id="seq-l" style="position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px); top:0; left:0; width:30vw; height:100vh; background: linear-gradient(to right, #fff 0%, #fff 10%, transparent 100%);"></div>
+  </div>
   <video id="vjvideo" autoplay muted playsinline></video>
-  <div id="hint">Click or press F for fullscreen · drag to 2nd screen first</div>
   <script>
     const video = document.getElementById('vjvideo');
-    const hint  = document.getElementById('hint');
     function goFullscreen() {
-      (document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)
-        .call(document.documentElement);
+      if (document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(()=>{});
+      } else if (document.documentElement.webkitRequestFullscreen) {
+        document.documentElement.webkitRequestFullscreen();
+      }
     }
-    video.addEventListener('click', goFullscreen);
+    video.addEventListener('dblclick', goFullscreen);
     document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'f') goFullscreen(); });
-    setTimeout(() => { hint.style.opacity = '0'; }, 4000);
+    setTimeout(goFullscreen, 100);
   <\/script>
 </body>
 </html>`);
@@ -869,6 +872,31 @@ async function toggleOutputWindow() {
 
 if (btnOutput) {
   btnOutput.addEventListener('click', toggleOutputWindow);
+}
+
+function reconnectOutputStream() {
+  if (!outputWin || outputWin.closed) return;
+  const canvas = (viewer && viewer.renderer && viewer.renderer.domElement)
+    ? viewer.renderer.domElement
+    : document.querySelector('#viewer-container canvas');
+
+  if (!canvas || typeof canvas.captureStream !== 'function') return;
+  
+  // Stop old stream tracks
+  if (outputStream) {
+    outputStream.getTracks().forEach(t => t.stop());
+  }
+  
+  outputStream = canvas.captureStream(60);
+  try {
+    const vid = outputWin.document.getElementById('vjvideo');
+    if (vid) {
+      vid.srcObject = outputStream;
+      vid.play().catch(() => {});
+    }
+  } catch (e) {
+    console.warn('Output window stream attach error:', e);
+  }
 }
 
 function resizeViewer() {
@@ -2462,8 +2490,13 @@ async function rebuildViewerBuffers() {
           
           vec4 viewCenter = transformModelViewMatrix * vec4(displacedCenter, 1.0);
           
-          // Vertex-based Depth of Field disabled (moved to post-processing)
           float dofScale = 1.0;
+          if (uDofAmount > 0.0) {
+              float distToFocus = abs(abs(viewCenter.z) - uDofFocus);
+              float blur = smoothstep(0.5, 5.0, distToFocus) * uDofAmount * 20.0;
+              dofScale = 1.0 + blur;
+              vOpacityMult *= 1.0 / (blur * 0.5 + 1.0);
+          }
           `
         );
         
@@ -2530,6 +2563,8 @@ async function rebuildViewerBuffers() {
       }
     }
     
+    reconnectOutputStream();
+
     if (statusEl) statusEl.textContent = "Ready.";
   } catch (err) {
     console.error('addSplatBuffers error:', err);
@@ -3151,6 +3186,25 @@ async function performRealtimeUpdate() {
     const strobeOverlayEl = strobeOverlayElCached;
     if (strobeOverlayEl) {
       // strobeOverlayEl.style.opacity = maxStrobeOpacity; // Removed bg strobe as requested
+    }
+
+    if (outputWin && !outputWin.closed) {
+      try {
+        const outStrobeOverlay = outputWin.document.getElementById('strobe-overlay');
+        if (outStrobeOverlay && strobeOverlayElCached) {
+          outStrobeOverlay.style.opacity = strobeOverlayElCached.style.opacity;
+          outStrobeOverlay.style.mixBlendMode = strobeOverlayElCached.style.mixBlendMode;
+        }
+        const outSeqs = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
+        for (let s = 0; s < 4; s++) {
+          const outEl = outputWin.document.getElementById(outSeqs[s]);
+          if (outEl && seqBlockEls && seqBlockEls[s]) {
+            outEl.style.opacity = seqBlockEls[s].style.opacity;
+          }
+        }
+      } catch (e) {
+        // Output window might be inaccessible or closed
+      }
     }
 
     let sceneIdx = 0;
