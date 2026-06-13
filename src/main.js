@@ -5,7 +5,7 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
-import { initMIDI, setMidiProfile } from './midi.js';
+import { initMIDI, setMidiProfile, setMidiLearn } from './midi.js';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -397,6 +397,8 @@ appDiv.innerHTML = `
           <option value="ddj-400">DDJ-400</option>
           <option value="ddj-flx4">DDJ-FLX4</option>
         </select>
+        <button id="btn-midi-learn" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">MIDI LEARN</button>
+        <button id="btn-midi-export" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">EXPORT MIDI</button>
       </div>
       <div class="flex-row" style="align-items:center;">
         <span class="knob-label" style="margin-right:4px;">HDRI</span>
@@ -414,6 +416,30 @@ appDiv.innerHTML = `
       <button id="btn-output" class="util-btn">OUTPUT →</button>
       <button id="btn-collapse" class="util-btn" style="background:#333;">HIDE UI</button>
     </div>
+  </div>
+
+  <!-- MIDI LEARN OVERLAY: shows last 12 incoming MIDI messages -->
+  <div id="midi-learn-overlay" style="
+    display: none;
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 99999;
+    background: rgba(0,0,0,0.88);
+    border: 1px solid #10b981;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: #10b981;
+    min-width: 300px;
+    max-width: 380px;
+    pointer-events: none;
+    line-height: 1.6;
+    box-shadow: 0 0 16px rgba(16,185,129,0.3);
+  ">
+    <div style="color:#fff; font-weight:bold; margin-bottom:4px; letter-spacing:1px; font-size:10px;">⬤ MIDI LEARN — incoming messages</div>
+    <div id="midi-learn-log" style="color:#10b981;"></div>
   </div>
 
   <!-- BOTTOM PANEL: FX & CROSSFADER -->
@@ -1179,6 +1205,94 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
   setMidiProfile(e.target.value);
 });
 
+// ── MIDI-Learn overlay wiring ──────────────────────────────────────────────────
+(function setupMidiLearn() {
+  const btnLearn    = document.getElementById('btn-midi-learn');
+  const btnExport   = document.getElementById('btn-midi-export');
+  const overlay     = document.getElementById('midi-learn-overlay');
+  const logEl       = document.getElementById('midi-learn-log');
+  if (!btnLearn || !overlay || !logEl) return;
+
+  const MAX_LINES = 12;
+  const learnLines = [];          // ring buffer of recent formatted strings (display only)
+  const fullLog = [];             // every message in order, for export
+  const summary = new Map();      // key `${type}:${ch}:${data1}` -> de-duped control entry
+  let orderCounter = 0;
+  let learnActive = false;
+
+  function recordMsg(msg) {
+    if (fullLog.length < 5000) fullLog.push({ ch: msg.channel, type: msg.type, data1: msg.data1, value: msg.value });
+    const key = `${msg.type}:${msg.channel}:${msg.data1}`;
+    let e = summary.get(key);
+    if (!e) {
+      e = { order: ++orderCounter, channel: msg.channel, type: msg.type, data1: msg.data1, count: 0, valueMin: msg.value, valueMax: msg.value, samples: [] };
+      summary.set(key, e);
+    }
+    e.count++;
+    if (msg.value < e.valueMin) e.valueMin = msg.value;
+    if (msg.value > e.valueMax) e.valueMax = msg.value;
+    if (e.samples.length < 8 && !e.samples.includes(msg.value)) e.samples.push(msg.value);
+  }
+
+  function addLearnLine(msg) {
+    recordMsg(msg);
+    // Format: ch <channel> | NOTE/CC <data1> (0x..) | val <value>
+    const typeLabel = msg.type === 'cc' ? 'CC ' : 'NOTE';
+    const hex = msg.data1.toString(16).toUpperCase().padStart(2, '0');
+    const line = `ch ${String(msg.channel).padStart(2)} | ${typeLabel} ${String(msg.data1).padStart(3)} (0x${hex}) | val ${String(msg.value).padStart(3)}`;
+    learnLines.unshift(line); // newest at top
+    if (learnLines.length > MAX_LINES) learnLines.length = MAX_LINES;
+    logEl.textContent = `distinct controls: ${summary.size}   messages: ${fullLog.length}\n` + learnLines.join('\n');
+  }
+
+  btnLearn.addEventListener('click', () => {
+    learnActive = !learnActive;
+    overlay.style.display = learnActive ? 'block' : 'none';
+    btnLearn.style.background = learnActive ? '#10b981' : '#444';
+    btnLearn.style.color      = learnActive ? '#000'    : '';
+    if (learnActive) {
+      // start a fresh capture session
+      learnLines.length = 0;
+      fullLog.length = 0;
+      summary.clear();
+      orderCounter = 0;
+      logEl.textContent = 'distinct controls: 0   messages: 0';
+    }
+    setMidiLearn(learnActive, learnActive ? addLearnLine : null);
+  });
+
+  if (btnExport) {
+    btnExport.addEventListener('click', () => {
+      const controls = [...summary.values()].sort((a, b) => a.order - b.order).map(e => ({
+        order: e.order,
+        channel: e.channel,
+        type: e.type,
+        data1: e.data1,
+        hex: '0x' + e.data1.toString(16).toUpperCase().padStart(2, '0'),
+        count: e.count,
+        valueMin: e.valueMin,
+        valueMax: e.valueMax,
+        samples: e.samples,
+      }));
+      const data = {
+        capturedAt: new Date().toISOString(),
+        note: 'Controls listed in the ORDER first touched. Move/press ONE control at a time so each row maps cleanly. valueMin/Max + samples reveal absolute knob (0..127 sweep) vs button (note on/off) vs relative jog (values near 63-65).',
+        distinctControls: controls.length,
+        controls,
+        rawCount: fullLog.length,
+        raw: fullLog,
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'midi-capture.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+  }
+})();
+
 document.getElementById('btn-strobe')?.addEventListener('click', () => {
   strobeEngaged = !strobeEngaged;
   const btn = document.getElementById('btn-strobe');
@@ -1454,8 +1568,12 @@ btnPlayB.addEventListener('click', () => {
 });
 
 btnCueA.addEventListener('click', () => {
+  isPlayingA = false;
+  btnPlayA.classList.remove('active');
   playAngleA = 0;
   jogAngleA = 0;
+  currentScalesA.fill(0);
+  stopAnimationLoop();
   triggerRealtimeUpdate();
   btnCueA.classList.add('active');
   setTimeout(() => btnCueA.classList.remove('active'), 200);
@@ -1474,8 +1592,12 @@ btnStopA.addEventListener('click', () => {
 });
 
 btnCueB.addEventListener('click', () => {
+  isPlayingB = false;
+  btnPlayB.classList.remove('active');
   playAngleB = 0;
   jogAngleB = 0;
+  currentScalesB.fill(0);
+  stopAnimationLoop();
   triggerRealtimeUpdate();
   btnCueB.classList.add('active');
   setTimeout(() => btnCueB.classList.remove('active'), 200);
@@ -3374,61 +3496,89 @@ async function performRealtimeUpdate() {
 
 // ── Reset ──────────────────────────────────────────────
 btnReset.addEventListener('click', async () => {
-  if (!sceneA) {
-    statusEl.textContent = 'Load Scene A first!';
-    return;
-  }
-
-  document.querySelectorAll('.knob').forEach(knob => {
-    knob.value = knob.id === 'master-vol' ? 80 : 50;
-    if (knob.classList.contains('ch-filter')) knob.value = 0;
-    updateKnobFill(knob);
+  // 1. Reset every range input to its HTML default value.
+  document.querySelectorAll('input[type=range]').forEach(el => {
+    el.value = el.defaultValue;
+    if (el.classList.contains('knob')) updateKnobFill(el);
   });
 
-  document.querySelectorAll('.ch-fader').forEach(fader => {
-    fader.value = 100;
-  });
+  // Keep crossfader / mix in sync.
+  if (crossfader && mixSlider) mixSlider.value = crossfader.value;
 
-  crossfader.value = 50;
-  mixSlider.value = 50;
-  seedInput.value = 42;
-  cutsSlider.value = 1;
+  // Reset seed and cuts to their HTML defaults.
+  if (seedInput) seedInput.value = seedInput.defaultValue;
+  if (cutsSlider) cutsSlider.value = cutsSlider.defaultValue;
 
-  isPlayingA = false;
-  isPlayingB = false;
-  playAngleA = 0;
-  playAngleB = 0;
-  jogAngleA = 0;
-  jogAngleB = 0;
+  // 2. FX toggles off.
+  fxEngagedA = false; fxActiveA = "none";
+  if (fxSelectA) fxSelectA.value = "none";
+  if (btnFxToggleA) btnFxToggleA.classList.remove('active');
+
+  fxEngagedB = false; fxActiveB = "none";
+  if (fxSelectB) fxSelectB.value = "none";
+  if (btnFxToggleB) btnFxToggleB.classList.remove('active');
+
+  fxEngagedC = false; fxActiveC = "none";
+  if (fxSelectC) fxSelectC.value = "none";
+  if (btnFxToggleC) btnFxToggleC.classList.remove('active');
+
+  fxEngagedD = false; fxActiveD = "none";
+  if (fxSelectD) fxSelectD.value = "none";
+  if (btnFxToggleD) btnFxToggleD.classList.remove('active');
+
+  fxEngagedM = false; fxActiveM = "none";
+  if (fxSelectM) fxSelectM.value = "none";
+  if (btnFxToggleM) btnFxToggleM.classList.remove('active');
+
+  // Strobe off.
+  strobeEngaged = false;
+  document.getElementById('btn-strobe')?.classList.remove('active');
+
+  // Loops off.
+  loopActiveA = false; isAutoLoopA = false;
+  loopActiveB = false; isAutoLoopB = false;
+  document.getElementById('loop-active-a')?.classList.remove('active');
+  document.getElementById('loop-active-b')?.classList.remove('active');
+  document.querySelectorAll('.pad-btn.active').forEach(el => el.classList.remove('active'));
+
+  // 3. Stop all decks.
+  isPlayingA = false; isPlayingB = false;
+  isPlayingC = false; isPlayingD = false;
+  playAngleA = 0; playAngleB = 0; playAngleC = 0; playAngleD = 0;
+  jogAngleA = 0; jogAngleB = 0; jogAngleC = 0; jogAngleD = 0;
+  if (currentScalesA) currentScalesA.fill(0);
+  if (currentScalesB) currentScalesB.fill(0);
+  if (currentScalesC) currentScalesC.fill(0);
+  if (currentScalesD) currentScalesD.fill(0);
   splashFactor = 1.0;
 
-  btnPlayA.classList.remove('active');
-  btnPlayB.classList.remove('active');
-
-  fxEngagedA = false;
-  fxActiveA = "none";
-  fxSelectA.value = "none";
-  btnFxToggleA.classList.remove('active');
-  fxDepthA.value = 50;
-  updateKnobFill(fxDepthA);
-
-  fxEngagedB = false;
-  fxActiveB = "none";
-  fxSelectB.value = "none";
-  btnFxToggleB.classList.remove('active');
-  fxDepthB.value = 50;
-  updateKnobFill(fxDepthB);
-
-  fxEngagedM = false;
-  fxActiveM = "none";
-  fxSelectM.value = "none";
-  btnFxToggleM.classList.remove('active');
-  fxDepthM.value = 50;
-  updateKnobFill(fxDepthM);
+  if (btnPlayA) btnPlayA.classList.remove('active');
+  if (btnPlayB) btnPlayB.classList.remove('active');
+  // C/D play buttons use inline style background instead of .active class.
+  const btnPlayCEl = document.getElementById('btn-play-c');
+  const btnPlayDEl = document.getElementById('btn-play-d');
+  if (btnPlayCEl) btnPlayCEl.style.background = '#111';
+  if (btnPlayDEl) btnPlayDEl.style.background = '#111';
 
   stopAnimationLoop();
-  statusEl.textContent = 'Mixer reset to default.';
-  triggerRealtimeUpdate();
+
+  // 4. Unload all decks.
+  sceneA = null; rawSceneA = null;
+  sceneB = null; rawSceneB = null;
+  sceneC = null; rawSceneC = null;
+  sceneD = null; rawSceneD = null;
+
+  for (const L of ['a', 'b', 'c', 'd']) {
+    const nameEl = document.getElementById(`file-${L}-name`);
+    const loadBtn = document.getElementById(`btn-load-${L}`);
+    const fileInput = document.getElementById(`file-${L}`);
+    if (nameEl) nameEl.textContent = 'No file';
+    if (loadBtn) loadBtn.classList.remove('loaded');
+    if (fileInput) fileInput.value = '';
+  }
+
+  await rebuildViewerBuffers();
+  statusEl.textContent = 'Reset — all settings cleared and decks unloaded.';
 });
 
 // ── Compatibility mappings for older test suites ───────
