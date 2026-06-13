@@ -41,6 +41,15 @@ export function setMidiLearn(enabled, sinkFn) {
 const _changeTimers = {};
 const CHANGE_DEBOUNCE_MS = 200;
 
+// ── Jitter suppression for mapSlider ──────────────────────────────────────────
+// Pioneer/Korg faders & knobs emit ADC noise (the value flickers ±1-2 at rest
+// and can jump). We smooth the raw 0-127 value and apply a small deadzone so the
+// visuals stop jittering without adding noticeable lag to deliberate moves.
+const _smoothVal = {};    // per-element smoothed 0-127 value
+const _lastApplied = {};  // per-element last value actually written
+const SMOOTH_ALPHA = 0.5; // 0..1 — higher = more responsive, lower = smoother
+const DEADZONE = 1.0;     // ignore changes smaller than this (in 0-127 units)
+
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 /**
@@ -53,10 +62,20 @@ const CHANGE_DEBOUNCE_MS = 200;
 function mapSlider(elementId, midiValue) {
   const el = document.getElementById(elementId);
   if (!el) return;
+
+  // Smooth the raw value (exponential) to kill ADC jitter.
+  const prev = _smoothVal[elementId];
+  const sm = (prev === undefined) ? midiValue : prev + (midiValue - prev) * SMOOTH_ALPHA;
+  _smoothVal[elementId] = sm;
+  // Deadzone: ignore sub-threshold wiggle so the visuals don't flicker at rest.
+  const last = _lastApplied[elementId];
+  if (last !== undefined && Math.abs(sm - last) < DEADZONE) return;
+  _lastApplied[elementId] = sm;
+
   const min = parseFloat(el.min) || 0;
   const max = parseFloat(el.max) || 100;
   // normalized value 0.0 - 1.0
-  const norm = midiValue / 127.0;
+  const norm = sm / 127.0;
   el.value = min + norm * (max - min);
 
   // Fire 'input' immediately — updates visuals and lightweight logic.
