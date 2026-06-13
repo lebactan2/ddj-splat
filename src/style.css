@@ -20,8 +20,17 @@ body, html {
 #viewer-container {
   position: absolute; top: 0; left: 0;
   width: 100%; height: 100%;
-  z-index: 0;
+  z-index: 1;
   pointer-events: auto;
+}
+
+/* ── Responsive layout variables ──────────────────────
+   --deck-w fluidly scales the side deck columns with viewport width.
+   Bar offsets are derived from it so the top/bottom bars always meet
+   the decks with a consistent gap, on any desktop size. */
+:root {
+  --deck-w: clamp(232px, 20vw, 320px);
+  --bar-gap: 24px; /* 16px screen margin + 8px gap to deck */
 }
 
 /* ── HUD Panels ─────────────────────────────────────── */
@@ -45,7 +54,7 @@ body, html {
 
 .panel-left {
   top: 16px; left: 16px;
-  width: 316px; height: calc(50% - 24px);
+  width: var(--deck-w); height: calc(50% - 24px);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -56,7 +65,7 @@ body, html {
 
 .panel-right {
   top: 16px; right: 16px;
-  width: 316px; height: calc(50% - 24px);
+  width: var(--deck-w); height: calc(50% - 24px);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -68,11 +77,11 @@ body, html {
 body.layout-4deck .panel-left, body.layout-4deck .panel-right {
   height: calc(50% - 24px);
   bottom: auto;
-  width: 316px;
+  width: var(--deck-w);
 }
 body.layout-4deck .panel-bottom-left {
   top: calc(50% + 8px); left: 16px; bottom: 16px;
-  width: 316px;
+  width: var(--deck-w);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -83,7 +92,7 @@ body.layout-4deck .panel-bottom-left {
 }
 body.layout-4deck .panel-bottom-right {
   top: calc(50% + 8px); right: 16px; bottom: 16px;
-  width: 316px;
+  width: var(--deck-w);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -111,17 +120,24 @@ body.layout-4deck .pads-grid {
 }
 
 .panel-top {
-  top: 16px; left: 340px; right: 340px;
+  top: 16px;
+  left: calc(var(--deck-w) + var(--bar-gap));
+  right: calc(var(--deck-w) + var(--bar-gap));
   height: 80px;
   border-radius: 16px;
   flex-direction: row;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
-  padding: 0 24px;
+  gap: clamp(8px, 1.2vw, 24px);
+  padding: 0 clamp(10px, 1.5vw, 24px);
+  overflow-x: auto;
 }
+.panel-top::-webkit-scrollbar { height: 0; }
 
 .panel-bottom {
-  bottom: 16px; left: 340px; right: 340px;
+  bottom: 16px;
+  left: calc(var(--deck-w) + var(--bar-gap));
+  right: calc(var(--deck-w) + var(--bar-gap));
   height: auto;
   min-height: 80px;
   border-radius: 16px;
@@ -363,6 +379,8 @@ body.layout-4deck .pads-grid {
 .util-section { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .util-btn { background: #222; border: 1px solid #444; color: #ccc; font-size: 10px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
 .util-btn:hover { background: #333; color: #fff; }
+.util-btn.active { background: #10b981; border-color: #10b981; color: #000; }
+.util-btn.active:hover { background: #0ea573; }
 
 #status { font-family: 'Share Tech Mono', monospace; font-size: 12px; color: #10b981; margin-top: 4px; }
 
@@ -376,3 +394,53 @@ body.layout-4deck .pads-grid {
 }
 .collapse-tab:hover { background: rgba(59,130,246,0.4); border-color: #3b82f6; }
 .collapse-tab.hidden { display: none; }
+
+/* ── Adaptive sizing for shorter desktops / laptops ───────
+   Decks stack two-high in 4-deck mode, so vertical space is the
+   tight axis. Shrink the largest controls as the viewport shortens
+   so all four decks keep fitting without scrolling. */
+@media (max-height: 900px) {
+  .jog-wheel { width: 76px; height: 76px; }
+  .jog-inner { width: 50px; height: 50px; }
+  .knob { width: 46px; height: 46px; }
+  .knob-small { width: 31px; height: 31px; }
+  .pad-btn { height: 32px; }
+}
+@media (max-height: 800px) {
+  .jog-wheel { width: 58px; height: 58px; }
+  .jog-inner { width: 38px; height: 38px; }
+  .jog-needle { height: 8px; }
+  .knob { width: 38px; height: 38px; }
+  .knob-small { width: 27px; height: 27px; }
+  .huge-round-btn { width: 26px; height: 26px; font-size: 9px; }
+  .pad-btn { height: 24px; font-size: 9px; }
+  .pads-grid { gap: 3px; }
+  .fader-wrapper, .tempo-wrapper { height: 52px !important; }
+  .ch-fader, .tempo-slider { top: 52px; width: 52px; }
+  .section-box { padding: 2px 5px; }
+  .panel-left, .panel-right,
+  .panel-bottom-left, .panel-bottom-right { gap: 2px; padding: 6px; }
+}
+/* Last-resort safety: if content still can't fit (very small screens),
+   allow the deck panels to scroll instead of clipping. */
+@media (max-height: 640px) {
+  .panel-left, .panel-right,
+  body.layout-4deck .panel-bottom-left,
+  body.layout-4deck .panel-bottom-right {
+    overflow-y: auto;
+  }
+}
+/* Narrow desktops: tighten the top-bar utility controls and let the
+   bar wrap to a second row instead of clipping its right-side buttons. */
+@media (max-width: 1400px) {
+  .util-btn { padding: 5px 8px; }
+  .panel-top {
+    height: auto;
+    min-height: 80px;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    row-gap: 4px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}

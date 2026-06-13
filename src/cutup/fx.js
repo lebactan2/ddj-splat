@@ -196,6 +196,7 @@ export function applyRollFx(source, params = {}) {
     bounds.size[2] * (0.12 + amount * 0.18),
   ];
   const capturedIndexes = [];
+  const capturedMask = new Uint8Array(count);
 
   const srcView = new DataView(source.data.buffer, source.data.byteOffset, source.data.byteLength);
 
@@ -209,11 +210,14 @@ export function applyRollFx(source, params = {}) {
         Math.abs(py - bounds.center[1]) <= boxHalfSize[1] &&
         Math.abs(pz - bounds.center[2]) <= boxHalfSize[2]) {
       capturedIndexes.push(i);
+      capturedMask[i] = 1;
     }
   }
 
   if (capturedIndexes.length === 0 && count > 0) {
-    capturedIndexes.push(Math.floor(count * 0.5));
+    const fallback = Math.floor(count * 0.5);
+    capturedIndexes.push(fallback);
+    capturedMask[fallback] = 1;
   }
 
   const taps = 2 + Math.round(amount * 5);
@@ -222,9 +226,8 @@ export function applyRollFx(source, params = {}) {
 
   const dstView = new DataView(output.buffer, output.byteOffset, output.byteLength);
 
-  const captured = new Set(capturedIndexes);
   for (let i = 0; i < count; i++) {
-    if (captured.has(i)) {
+    if (capturedMask[i]) {
       fadeSplat(output, i, 1, 1.12);
       scaleSplatSize(dstView, i, 1.08);
     } else {
@@ -309,6 +312,10 @@ export function applySpiralFx(source, params = {}) {
   const amount = getAmount(params);
   const bounds = estimateBounds(source);
   const center = bounds.center;
+  const centerX = center[0];
+  const centerY = center[1];
+  const centerZ = center[2];
+  const sizeY = bounds.size[1];
   const taps = 2 + Math.round(amount * 5);
   const sampledIndexes = getSampledIndexes(count, 0.12 + amount * 0.34);
   const output = new Uint8Array((count + sampledIndexes.length * taps) * 32);
@@ -329,6 +336,8 @@ export function applySpiralFx(source, params = {}) {
     const sin = Math.sin(angle);
     const collapse = Math.pow(0.88 - amount * 0.28, tap);
     const covarianceScale = Math.pow(0.86 - amount * 0.38, tap);
+    const yOffset = sizeY * 0.018 * tap;
+    const alphaDecay = Math.pow(0.74, tap);
 
     for (const srcIndex of sampledIndexes) {
       const srcBase = srcIndex * 32;
@@ -339,18 +348,18 @@ export function applySpiralFx(source, params = {}) {
       const py = srcView.getFloat32(srcBase + 4, true);
       const pz = srcView.getFloat32(srcBase + 8, true);
 
-      const dx = px - center[0];
-      const dy = py - center[1];
-      const dz = pz - center[2];
+      const dx = px - centerX;
+      const dy = py - centerY;
+      const dz = pz - centerZ;
       const sx = dx * cos - dz * sin;
       const sz = dx * sin + dz * cos;
 
       setPosition(
         dstView,
         writeIndex,
-        center[0] + sx * collapse,
-        center[1] + dy * collapse + bounds.size[1] * 0.018 * tap,
-        center[2] + sz * collapse
+        centerX + sx * collapse,
+        centerY + dy * collapse + yOffset,
+        centerZ + sz * collapse
       );
       scaleSplatSize(dstView, writeIndex, covarianceScale);
 
@@ -361,7 +370,7 @@ export function applySpiralFx(source, params = {}) {
       output[dstBase + 24] = clampByte((r * (1 + t * 1.2) + luminance * t * 0.4) * 255);
       output[dstBase + 25] = clampByte((g * (1 - t * 0.35) + b * t * 0.25) * 255);
       output[dstBase + 26] = clampByte((b * (1 - t * 0.75) + (1 - luminance) * t * 0.3) * 255);
-      output[dstBase + 27] = clampByte(output[dstBase + 27] * Math.pow(0.74, tap));
+      output[dstBase + 27] = clampByte(output[dstBase + 27] * alphaDecay);
 
       writeIndex++;
     }

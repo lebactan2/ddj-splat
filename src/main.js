@@ -105,6 +105,9 @@ let currentScalesC = new Float32Array(32).fill(0);
 let currentScalesD = new Float32Array(32).fill(0);
 
 let isCameraFramed = false;
+let baseFramedDistance = 5;
+let isZoomSyncing = false;
+let zoomSyncAttached = false;
 let updateInProgress = false;
 let updatePending = false;
 
@@ -188,6 +191,12 @@ let fxActiveM = "none";
 let fxEngagedM = false;
 let beatIndexM = 4;
 
+let strobeEngaged = false;
+let strobeMode = 'side';
+// Cached strobe DOM elements (populated once the lazy seq blocks are created)
+let seqBlockEls = null;
+let strobeOverlayElCached = null;
+
 const beatDivisions = ["1/32", "1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8", "16", "32"];
 let lastRollStateA = false;
 let lastRollStateB = false;
@@ -197,7 +206,9 @@ let lastRollStateD = false;
 // ── Inject DDJ-400 UI ──────────────────────────────────
 const appDiv = document.querySelector('#app');
 appDiv.innerHTML = `
-  <div id="strobe-overlay" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:white; pointer-events:none; z-index:999999; opacity:0; mix-blend-mode:difference;"></div>
+  <div id="strobe-layer" style="position:absolute; inset:0; z-index:0; background:#050508; pointer-events:none; overflow:hidden;">
+    <div id="strobe-overlay" style="position:absolute; inset:0; background:white; pointer-events:none; z-index:2; opacity:0; mix-blend-mode:difference;"></div>
+  </div>
   <div id="viewer-container"></div>
   
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
@@ -351,7 +362,7 @@ appDiv.innerHTML = `
   </div>
 
   <!-- TOP PANEL: SETTINGS & UTILS -->
-  <div class="hud-panel panel-top" style="justify-content: flex-start; gap: 24px;">
+  <div class="hud-panel panel-top">
     <div class="flex-row" style="gap:12px;">
       <div id="fps-counter" style="color:#10b981; font-family:monospace; font-size:14px; font-weight:bold; white-space:nowrap; min-width:60px;">0 FPS</div>
       <div id="status" style="color:#10b981; font-family:monospace; font-size:11px; font-weight:bold; max-width:180px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">Ready</div>
@@ -376,6 +387,13 @@ appDiv.innerHTML = `
       <div class="knob-cell" style="flex-direction:row;">
         <span class="knob-label">FLARE</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-lensflare">
       </div>
+      <div class="flex-row" style="align-items:center; gap:4px;">
+        <button id="btn-strobe" class="util-btn" style="font-size:9px; padding:2px 5px;">STROBE</button>
+        <select id="strobe-mode" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
+          <option value="side">SIDE</option>
+          <option value="full">FULL</option>
+        </select>
+      </div>
       <div class="flex-row" style="align-items:center;">
         <span class="knob-label" style="margin-right:4px;">HDRI</span>
         <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer;">
@@ -389,6 +407,7 @@ appDiv.innerHTML = `
     <div class="flex-row" style="gap:8px; border-left:1px solid rgba(255,255,255,0.1); padding-left:16px;">
       <button id="btn-reset" class="util-btn">RESET</button>
       <button id="btn-export" class="util-btn">EXPORT</button>
+      <button id="btn-output" class="util-btn">OUTPUT →</button>
       <button id="btn-collapse" class="util-btn" style="background:#333;">HIDE UI</button>
     </div>
   </div>
@@ -572,6 +591,7 @@ const seedInput = document.querySelector('#seed-input');
 const btnExport = document.querySelector('#btn-export');
 const btnReset = document.querySelector('#btn-reset');
 const crossfader = document.querySelector('#crossfader');
+const masterVol = document.querySelector('#master-vol');
 const fxSelectA = document.querySelector('#fx-select-a');
 const fxDepthA = document.querySelector('#fx-depth-a');
 const btnFxToggleA = document.querySelector('#btn-fx-toggle-a');
@@ -691,6 +711,166 @@ if (btnShowController) {
   });
 }
 
+// ── Output to second screen ──────────────────────────────────────────────────
+// FPS note: we render the splats ONCE in the existing WebGL renderer and mirror
+// the canvas via captureStream() into a fullscreen <video> in a popup window.
+// This avoids the ~2× GPU cost of a second WebGL renderer.
+// ─────────────────────────────────────────────────────────────────────────────
+let outputWin = null;
+let outputStream = null;
+let outputPollInterval = null;
+
+const btnOutput = document.querySelector('#btn-output');
+
+function stopOutputStream() {
+  if (outputStream) {
+    outputStream.getTracks().forEach(t => t.stop());
+    outputStream = null;
+  }
+  if (outputPollInterval) {
+    clearInterval(outputPollInterval);
+    outputPollInterval = null;
+  }
+  if (btnOutput) {
+    btnOutput.textContent = 'OUTPUT →';
+    btnOutput.classList.remove('active');
+  }
+}
+
+async function toggleOutputWindow() {
+  // If window is already open, close it
+  if (outputWin && !outputWin.closed) {
+    outputWin.close();
+    outputWin = null;
+    stopOutputStream();
+    return;
+  }
+
+  // Find the renderer canvas
+  const canvas = (viewer && viewer.renderer && viewer.renderer.domElement)
+    ? viewer.renderer.domElement
+    : document.querySelector('#viewer-container canvas');
+
+  if (!canvas) {
+    if (statusEl) statusEl.textContent = 'Load a splat first';
+    return;
+  }
+
+  // Capture the canvas stream (60 fps)
+  if (typeof canvas.captureStream !== 'function') {
+    if (statusEl) statusEl.textContent = 'captureStream not supported';
+    return;
+  }
+  outputStream = canvas.captureStream(60);
+
+  // Try Window Management API to open on external screen
+  let winFeatures = 'width=1280,height=720';
+  let targetScreen = null;
+
+  if (typeof window.getScreenDetails === 'function') {
+    try {
+      const sd = await window.getScreenDetails();
+      targetScreen = sd.screens.find(s => !s.isPrimary && s.isExtended !== false)
+                  || sd.screens.find(s => s !== sd.currentScreen)
+                  || null;
+      if (targetScreen) {
+        winFeatures = `left=${targetScreen.left},top=${targetScreen.top},width=${targetScreen.width},height=${targetScreen.height}`;
+      }
+    } catch (e) {
+      // Permission denied or API unavailable — fall back to plain open
+      console.warn('getScreenDetails denied, using fallback:', e);
+    }
+  }
+
+  outputWin = window.open('', 'vj-output', winFeatures);
+  if (!outputWin) {
+    if (statusEl) statusEl.textContent = 'Popup blocked — allow popups';
+    stopOutputStream();
+    return;
+  }
+
+  // If we have screen coordinates, try to move/resize to that screen
+  if (targetScreen) {
+    try {
+      outputWin.moveTo(targetScreen.left, targetScreen.top);
+      outputWin.resizeTo(targetScreen.width, targetScreen.height);
+    } catch (e) { /* ignore */ }
+  }
+
+  // Write minimal HTML into the output window
+  outputWin.document.open();
+  outputWin.document.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>VJ Output</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html, body { width:100%; height:100%; background:#000; overflow:hidden; }
+    video {
+      display:block; width:100vw; height:100vh;
+      object-fit:contain; background:#000; cursor:pointer;
+    }
+    #hint {
+      position:fixed; bottom:12px; left:50%; transform:translateX(-50%);
+      color:rgba(255,255,255,0.35); font-family:monospace; font-size:11px;
+      pointer-events:none; transition:opacity 1s;
+    }
+  </style>
+</head>
+<body>
+  <video id="vjvideo" autoplay muted playsinline></video>
+  <div id="hint">Click or press F for fullscreen · drag to 2nd screen first</div>
+  <script>
+    const video = document.getElementById('vjvideo');
+    const hint  = document.getElementById('hint');
+    function goFullscreen() {
+      (document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)
+        .call(document.documentElement);
+    }
+    video.addEventListener('click', goFullscreen);
+    document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'f') goFullscreen(); });
+    setTimeout(() => { hint.style.opacity = '0'; }, 4000);
+  <\/script>
+</body>
+</html>`);
+  outputWin.document.close();
+
+  // Attach the stream to the video element
+  const attachStream = () => {
+    try {
+      const vid = outputWin.document.getElementById('vjvideo');
+      if (vid) {
+        vid.srcObject = outputStream;
+        vid.play().catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Output window stream attach error:', e);
+    }
+  };
+
+  // Small delay to let the document settle
+  setTimeout(attachStream, 200);
+
+  // Update button state
+  if (btnOutput) {
+    btnOutput.textContent = 'OUTPUT ■';
+    btnOutput.classList.add('active');
+  }
+
+  // Poll to detect user closing the popup
+  outputPollInterval = setInterval(() => {
+    if (outputWin && outputWin.closed) {
+      outputWin = null;
+      stopOutputStream();
+    }
+  }, 1000);
+}
+
+if (btnOutput) {
+  btnOutput.addEventListener('click', toggleOutputWindow);
+}
+
 function resizeViewer() {
   // Viewer-container takes 100% implicitly
   setTimeout(() => {
@@ -701,6 +881,8 @@ window.addEventListener('resize', resizeViewer);
 
 window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'h') {
+    // Reset Master Vol to default FIRST so centerCamera frames at the default zoom
+    if (masterVol) { masterVol.value = 80; updateKnobFill(masterVol); }
     if (typeof centerCamera === 'function') centerCamera();
   }
 });
@@ -941,11 +1123,45 @@ document.getElementById('hdri-select')?.addEventListener('change', (e) => {
   setHdri(e.target.value);
 });
 
+document.getElementById('btn-strobe')?.addEventListener('click', () => {
+  strobeEngaged = !strobeEngaged;
+  const btn = document.getElementById('btn-strobe');
+  if (btn) btn.classList.toggle('active', strobeEngaged);
+  if (strobeEngaged) {
+    startAnimationLoop();
+  } else {
+    stopAnimationLoop();
+  }
+});
+
+document.getElementById('strobe-mode')?.addEventListener('change', (e) => {
+  strobeMode = e.target.value;
+});
+
 // Sync crossfader to hidden mixSlider for test suite compatibility
 crossfader.addEventListener('input', () => {
   mixSlider.value = crossfader.value;
   triggerRealtimeUpdate();
 });
+
+// ── Master Volume → Camera Zoom ──
+// vol=80 → factor 1.0 (neutral); higher vol → zoom in; lower vol → zoom out
+if (masterVol) {
+  masterVol.addEventListener('input', () => {
+    if (!viewer || !viewer.controls) return;
+    const t = Number(masterVol.value) / 100;
+    let factor = 1.0 - (t - 0.8) * 1.5;
+    factor = Math.max(0.4, Math.min(1.8, factor));
+    const targetPos = viewer.controls.target;
+    const camPos = viewer.camera.position;
+    const dir = camPos.clone().sub(targetPos).normalize();
+    const newDist = baseFramedDistance * factor;
+    viewer.camera.position.copy(targetPos).addScaledVector(dir, newDist);
+    isZoomSyncing = true;
+    viewer.controls.update();
+    isZoomSyncing = false;
+  });
+}
 
 // ── Deck A FX Event Listeners ──
 btnBeatPrevA.addEventListener('click', () => { if (beatIndexA > 0) { beatIndexA--; beatValueAEl.textContent = beatDivisions[beatIndexA]; triggerRealtimeUpdate(); } });
@@ -1375,6 +1591,73 @@ let lastTime = performance.now();
 let frameCount = 0;
 let lastFpsTime = lastTime;
 
+// ── Adaptive resolution scaling (fill-rate / overdraw mitigation) ──
+// Gaussian-splat rendering is fragment/blend bound: zooming in makes each
+// splat cover more pixels, so lowering the internal drawing-buffer resolution
+// cuts fragment work roughly proportionally. We scale the renderer + composer
+// pixel ratio (NOT the CSS size) so the canvas stays full-screen and upscales.
+const RENDER_SCALE_NOTCHES = [1.0, 0.85, 0.72, 0.6, 0.5];
+let renderScaleIndex = 0;            // index into RENDER_SCALE_NOTCHES
+let smoothedFps = 60;                // EMA of measured FPS
+let smoothedFpsInit = false;
+let lastScaleAdjustTime = 0;         // cooldown timestamp (ms, performance.now)
+const FPS_DOWN_THRESHOLD = 45;       // below -> step resolution down
+const FPS_UP_THRESHOLD = 57;         // above -> step resolution up
+const SCALE_COOLDOWN_MS = 1000;      // adjust at most ~once per FPS tick
+const FPS_EMA_ALPHA = 0.4;           // weight of newest sample
+
+function getBaseDPR() {
+  return Math.min(window.devicePixelRatio || 1, 2);
+}
+
+// Apply the current render-scale notch to whatever draws on screen.
+// On-screen path: viewer.render is overridden to composer.render(); the splats
+// are drawn into the composer's offscreen render targets (sized width*pixelRatio)
+// and the final copy pass blits to the canvas. So we must scale BOTH the
+// renderer pixel ratio (final canvas blit) and the composer pixel ratio
+// (offscreen targets where the overdraw actually happens).
+function applyRenderScale() {
+  if (!viewer || !viewer.renderer) return;
+  const scale = RENDER_SCALE_NOTCHES[renderScaleIndex] || 1.0;
+  const effectiveRatio = getBaseDPR() * scale;
+  try {
+    viewer.renderer.setPixelRatio(effectiveRatio);
+    if (composer) {
+      if (typeof composer.setPixelRatio === 'function') {
+        // setPixelRatio() internally re-runs setSize() on the render targets.
+        composer.setPixelRatio(effectiveRatio);
+      } else if (typeof composer.setSize === 'function') {
+        composer.setSize(window.innerWidth, window.innerHeight);
+      }
+    }
+    if (typeof viewer.forceRenderNextFrame === 'function') {
+      viewer.forceRenderNextFrame();
+    }
+  } catch (e) {
+    console.warn('applyRenderScale failed:', e);
+  }
+}
+window.applyRenderScale = applyRenderScale;
+
+// Drive the adaptive controller from the once-per-second FPS measurement.
+function updateAdaptiveResolution(fps, now) {
+  if (!viewer || !viewer.renderer) return;
+  if (!smoothedFpsInit) { smoothedFps = fps; smoothedFpsInit = true; }
+  else smoothedFps = smoothedFps * (1 - FPS_EMA_ALPHA) + fps * FPS_EMA_ALPHA;
+
+  if (now - lastScaleAdjustTime < SCALE_COOLDOWN_MS) return;
+
+  if (smoothedFps < FPS_DOWN_THRESHOLD && renderScaleIndex < RENDER_SCALE_NOTCHES.length - 1) {
+    renderScaleIndex++;
+    lastScaleAdjustTime = now;
+    applyRenderScale();
+  } else if (smoothedFps > FPS_UP_THRESHOLD && renderScaleIndex > 0) {
+    renderScaleIndex--;
+    lastScaleAdjustTime = now;
+    applyRenderScale();
+  }
+}
+
 function startAnimationLoop() {
   if (animationFrameId) return;
   
@@ -1386,6 +1669,7 @@ function startAnimationLoop() {
       const fps = Math.round((frameCount * 1000) / (time - lastFpsTime));
       const fpsEl = document.querySelector('#fps-counter');
       if (fpsEl) fpsEl.textContent = `${fps} FPS`;
+      updateAdaptiveResolution(fps, time);
       frameCount = 0;
       lastFpsTime = time;
     }
@@ -1409,9 +1693,10 @@ function startAnimationLoop() {
     // Animate VU meter heights
     updateVuMeters();
     
-    if ((fxEngagedA && (fxActiveA === 'flanger' || fxActiveA === 'trans')) || 
+    if ((fxEngagedA && (fxActiveA === 'flanger' || fxActiveA === 'trans')) ||
         (fxEngagedB && (fxActiveB === 'flanger' || fxActiveB === 'trans')) ||
-        (fxEngagedM && (fxActiveM === 'flanger' || fxActiveM === 'trans'))) {
+        (fxEngagedM && (fxActiveM === 'flanger' || fxActiveM === 'trans')) ||
+        strobeEngaged) {
       needsUpdate = true;
     }
     
@@ -1425,7 +1710,7 @@ function startAnimationLoop() {
 }
 
 function stopAnimationLoop() {
-  if (!isPlayingA && !isPlayingB && splashFactor <= 1.0 && 
+  if (!isPlayingA && !isPlayingB && splashFactor <= 1.0 && !strobeEngaged &&
       (!fxEngagedA || (fxActiveA !== 'flanger' && fxActiveA !== 'trans')) &&
       (!fxEngagedB || (fxActiveB !== 'flanger' && fxActiveB !== 'trans')) &&
       (!fxEngagedM || (fxActiveM !== 'flanger' && fxActiveM !== 'trans'))) {
@@ -1486,7 +1771,38 @@ async function makeViewer() {
   });
   window.viewer = viewer;
   viewer.start();
+  // Make the WebGL canvas background transparent so the strobe layer behind shows through
+  if (viewer.renderer) {
+    viewer.renderer.setClearColor(0x000000, 0);
+    viewer.renderer.setClearAlpha(0);
+  }
   isCameraFramed = false;
+
+  // Attach wheel→knob sync once controls are available (may be ready immediately or deferred)
+  zoomSyncAttached = false;
+  function attachZoomSync() {
+    if (zoomSyncAttached || !viewer || !viewer.controls) return;
+    zoomSyncAttached = true;
+    viewer.controls.addEventListener('change', () => {
+      if (isZoomSyncing) return;
+      if (!viewer || !viewer.controls || !masterVol || baseFramedDistance <= 0) return;
+      const currentDist = viewer.camera.position.distanceTo(viewer.controls.target);
+      const factor = currentDist / baseFramedDistance;
+      // Invert: factor = 1.0 - (t - 0.8)*1.5  =>  t = 0.8 - (factor - 1.0)/1.5
+      const t = 0.8 - (factor - 1.0) / 1.5;
+      const vol = Math.max(0, Math.min(100, Math.round(t * 100)));
+      masterVol.value = vol;
+      updateKnobFill(masterVol);
+    });
+  }
+  if (viewer.controls) {
+    attachZoomSync();
+  } else {
+    // Controls not yet ready — attach on first animation frame when available
+    const _origPRU = window._zoomSyncPoll;
+    window._zoomSyncPoll = attachZoomSync;
+  }
+
   return viewer;
 }
 
@@ -1496,19 +1812,29 @@ function centerCamera() {
   
   const fov = viewer.camera.fov || 65;
   const targetDist = 5.0;
-  // 2x zoom-out: persistent framing distance for load, play, and stop alike
-  const distance = ((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 2.0;
+  // 1.5x larger framing: persistent framing distance for load, play, and stop alike
+  const distance = ((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 3.0;
+  baseFramedDistance = distance;
 
-  viewer.camera.position.set(0, 0, distance);
+  // Preserve the user's current Master-Volume zoom across reframes (FX apply,
+  // HUD toggle, viewer rebuild). Only an explicit H reset returns vol to 80.
+  let zoomFactor = 1.0;
+  if (masterVol) {
+    const t = Number(masterVol.value) / 100;
+    zoomFactor = Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
+  }
+  const camDist = distance * zoomFactor;
+
+  viewer.camera.position.set(0, 0, camDist);
   if (viewer.controls && viewer.controls.target) {
     viewer.controls.target.set(0, 0, 0);
     viewer.controls.update();
   } else {
     viewer.camera.lookAt(0, 0, 0);
   }
-  
+
   viewer.camera.near = 0.1;
-  viewer.camera.far = distance * 10;
+  viewer.camera.far = distance * 18;
   viewer.camera.updateProjectionMatrix();
 }
 
@@ -1785,6 +2111,7 @@ function setupPostProcessingAndLensFlare() {
     render: function (renderer, writeBuffer, readBuffer) {
       // Render splats + scene into writeBuffer so subsequent passes can read it
       renderer.setRenderTarget(writeBuffer);
+      renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.autoClear = false;
 
@@ -1880,6 +2207,11 @@ function setupPostProcessingAndLensFlare() {
     originalResize.call(this, w, h, updateStyle);
     composer.setSize(w, h);
   };
+
+  // The composer captured the renderer's pixel ratio at construction; re-apply
+  // the current adaptive notch so both renderer and composer stay in sync
+  // (and so a freshly-rebuilt viewer keeps the active scale).
+  applyRenderScale();
 }
 
 async function rebuildViewerBuffers() {
@@ -2538,10 +2870,20 @@ async function performRealtimeUpdate() {
     requestAnimationFrame(performRealtimeUpdate);
     return;
   }
-  
+
+  // Deferred zoom-sync: attach controls 'change' listener once controls become available
+  if (!zoomSyncAttached && viewer.controls) {
+    if (window._zoomSyncPoll) { window._zoomSyncPoll(); }
+  }
+
   try {
+    const now = Date.now();
     const cuts = parseInt(cutsSlider.value);
     const mixAmount = Number(crossfader.value) / 100;
+    // Equal-power crossfade gains: full A at mixAmount 0, full B at 1.
+    // Applied as a smooth per-deck opacity so the opposite deck fully fades out.
+    const crossGainA = Math.cos(mixAmount * Math.PI / 2);
+    const crossGainB = Math.sin(mixAmount * Math.PI / 2);
     const isPlaying = isPlayingA || isPlayingB || isScratchingA || isScratchingB;
     
     const jogTotal = jogAngleA + jogAngleB;
@@ -2689,67 +3031,83 @@ async function performRealtimeUpdate() {
     let strobeAlphaA = 1.0;
     let isTransOn = true;
     const transFreq = (fxEngagedM && fxActiveM === 'trans') ? beatFreqM : (isTransA ? beatFreqA : beatFreqB);
-    const phase = Date.now() * 0.001 * Math.PI * 2 * transFreq; // Strobe frequency same as beats (no * 2)
+    const phase = now * 0.001 * Math.PI * 2 * transFreq; // Strobe frequency same as beats (no * 2)
     isTransOn = Math.sin(phase) > 0;
     
     if (isTransA) {
       const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountA;
-      const offAlpha = Math.max(0.0, 1.0 - transAmount);
-      strobeAlphaA = isTransOn ? 1.0 : offAlpha;
+      const offAlpha = Math.max(0.0, 1.0 - transAmount * 1.8);
+      strobeAlphaA = isTransOn ? 1.25 : offAlpha;
     }
-    
+
     let strobeAlphaB = 1.0;
     if (isTransB) {
       const transAmount = (fxEngagedM && fxActiveM === 'trans') ? amountM : amountB;
-      const offAlpha = Math.max(0.0, 1.0 - transAmount);
-      strobeAlphaB = isTransOn ? 1.0 : offAlpha;
+      const offAlpha = Math.max(0.0, 1.0 - transAmount * 1.8);
+      strobeAlphaB = isTransOn ? 1.25 : offAlpha;
     }
     
     if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uStrobeAlphaA) {
-      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaA;
-      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB;
+      // Combine trans-strobe alpha with the crossfader opacity gain per deck
+      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaA * crossGainA;
+      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB * crossGainB;
     }
     
     // Background sequencer strobe (rectangle sequencer with gradients)
-    if (!document.getElementById('seq-t')) {
-      const seqStyle = "position:absolute; opacity:0; pointer-events:none; z-index:10; transition:opacity 0.05s ease-out;";
+    if (!seqBlockEls) {
+      // Soft, blurred edge gradients that melt into the dark background rather
+      // than reading as hard white rectangles.
+      const seqStyle = "position:absolute; opacity:0; pointer-events:none; z-index:1; transition:opacity 0.08s ease-out; filter:blur(48px);";
       const createBlock = (id, props) => {
         const el = document.createElement('div');
         el.id = id; el.style.cssText = seqStyle + props;
-        const parent = document.getElementById('viewer-container') || document.body;
+        const parent = document.getElementById('strobe-layer') || document.getElementById('viewer-container') || document.body;
         parent.appendChild(el);
+        return el;
       };
-      createBlock('seq-t', "top:0; left:0; width:100vw; height:200px; background: linear-gradient(to bottom, rgba(255,255,255,1), transparent);");
-      createBlock('seq-r', "top:0; right:0; width:200px; height:100vh; background: linear-gradient(to left, rgba(255,255,255,1), transparent);");
-      createBlock('seq-b', "bottom:0; left:0; width:100vw; height:200px; background: linear-gradient(to top, rgba(255,255,255,1), transparent);");
-      createBlock('seq-l', "top:0; left:0; width:200px; height:100vh; background: linear-gradient(to right, rgba(255,255,255,1), transparent);");
+      // White is solid at the screen edge (a short plateau) then fades inward,
+      // so the blur softens only the inner falloff and the peak stays at the edge.
+      seqBlockEls = [
+        createBlock('seq-t', "top:0; left:0; width:100vw; height:34vh; background: linear-gradient(to bottom, #fff 0%, #fff 10%, transparent 100%);"),
+        createBlock('seq-r', "top:0; right:0; width:30vw; height:100vh; background: linear-gradient(to left, #fff 0%, #fff 10%, transparent 100%);"),
+        createBlock('seq-b', "bottom:0; left:0; width:100vw; height:34vh; background: linear-gradient(to top, #fff 0%, #fff 10%, transparent 100%);"),
+        createBlock('seq-l', "top:0; left:0; width:30vw; height:100vh; background: linear-gradient(to right, #fff 0%, #fff 10%, transparent 100%);"),
+      ];
     }
 
-    const anyTransActive = isTransA || isTransB;
-    if (anyTransActive) {
-      const globalSeqPhase = Math.floor((Date.now() * 0.001 * transFreq * 2)) % 4; // Freq x2 for sequencer
-      const overallTransAmount = Math.max(
-        (fxEngagedA && fxActiveA === 'trans') ? amountA : 0,
-        (fxEngagedB && fxActiveB === 'trans') ? amountB : 0,
-        (fxEngagedM && fxActiveM === 'trans') ? amountM : 0
-      );
-      
-      const seqs = ['seq-t', 'seq-r', 'seq-b', 'seq-l'];
-      seqs.forEach((id, idx) => {
-        const el = document.getElementById(id);
-        if (el) {
-          if (idx === globalSeqPhase) {
-            el.style.opacity = overallTransAmount * 0.9;
-          } else {
-            el.style.opacity = 0;
-          }
+    // STROBE control drives background sequencer (independent of Trans)
+    if (!strobeOverlayElCached) strobeOverlayElCached = document.getElementById('strobe-overlay');
+    const strobeOverlay = strobeOverlayElCached;
+    if (strobeEngaged) {
+      const bpm = Math.max(bpmA, bpmB) || 120;
+      const beatPhase = (now * 0.001) * (bpm / 60);
+      if (strobeMode === 'side') {
+        // Hide full-screen overlay
+        if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
+        // Cycle 4 edge gradient blocks one per beat
+        const globalSeqPhase = Math.floor(beatPhase) % 4;
+        for (let s = 0; s < seqBlockEls.length; s++) {
+          const el = seqBlockEls[s];
+          if (el) el.style.opacity = (s === globalSeqPhase) ? 0.6 : 0;
         }
-      });
+      } else {
+        // full mode: hide edge blocks, flash full-screen overlay on beat
+        for (let s = 0; s < seqBlockEls.length; s++) {
+          const el = seqBlockEls[s];
+          if (el) el.style.opacity = 0;
+        }
+        if (strobeOverlay) {
+          strobeOverlay.style.mixBlendMode = 'normal';
+          strobeOverlay.style.opacity = (Math.sin(beatPhase * Math.PI * 2) > 0) ? 0.9 : 0;
+        }
+      }
     } else {
-      ['seq-t', 'seq-r', 'seq-b', 'seq-l'].forEach(id => {
-        const el = document.getElementById(id);
+      // Off: clear all seq blocks and overlay
+      for (let s = 0; s < seqBlockEls.length; s++) {
+        const el = seqBlockEls[s];
         if (el) el.style.opacity = 0;
-      });
+      }
+      if (strobeOverlay) { strobeOverlay.style.opacity = 0; strobeOverlay.style.mixBlendMode = 'difference'; }
     }
 
     // Process Delay/Echo with 2D Feedback Post-processing
@@ -2790,7 +3148,7 @@ async function performRealtimeUpdate() {
       }
     }
 
-    const strobeOverlayEl = document.getElementById('strobe-overlay');
+    const strobeOverlayEl = strobeOverlayElCached;
     if (strobeOverlayEl) {
       // strobeOverlayEl.style.opacity = maxStrobeOpacity; // Removed bg strobe as requested
     }
@@ -2798,38 +3156,38 @@ async function performRealtimeUpdate() {
     let sceneIdx = 0;
 
     const targetDist = 5.0;
-    
+    const globalZ = (now * 0.0002) % (Math.PI * 2);
+    const splatMesh = viewer.splatMesh;
+    const sceneCount = splatMesh ? splatMesh.getSceneCount() : Infinity;
+
     // Apply fast GPU transforms and visibility to Scene A
     const totalChunksA = numChunksA + numRollChunksA;
     for (let i = 0; i < totalChunksA; i++) {
-      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
+      if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
 
-      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
-      
       let targetVisible = false;
       let targetScaleFactor = 0;
       let beatScaleMult = 1.0;
       let rX = 0, rY = 0, rZ = globalZ;
       
       if (isPlaying) {
-        const rand = pseudoRandom(timeStepA, i + 100);
-        targetVisible = rand >= mixAmount;
+        targetVisible = crossGainA > 0.01;
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
         rX = (pseudoRandom(timeStepA, i + 300) - 0.5) * Math.PI * 2;
         rY = (pseudoRandom(timeStepA, i + 400) - 0.5) * Math.PI * 2;
         rZ = (pseudoRandom(timeStepA, i + 500) - 0.5) * Math.PI * 2;
       } else {
-        targetVisible = mixAmount < 1.0;
-        targetScaleFactor = 1.0 - mixAmount;
+        targetVisible = crossGainA > 0.01;
+        targetScaleFactor = 1.0;
         beatScaleMult = 1.0;
         rX = 0; rY = 0; rZ = 0;
       }
-      
+
       currentScalesA[i] += (targetScaleFactor - currentScalesA[i]) * 0.15;
-      splatScene.visible = isPlaying ? targetVisible : (currentScalesA[i] > 0.01);
+      splatScene.visible = targetVisible;
       
       const scaleA = targetDist / boundsA.maxDist;
       const activeScale = Math.max(0.0001, currentScalesA[i] * scaleA * beatScaleMult);
@@ -2859,30 +3217,27 @@ async function performRealtimeUpdate() {
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
 
-      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
-      
       let targetVisible = false;
       let targetScaleFactor = 0;
       let beatScaleMult = 1.0;
       let rX = 0, rY = 0, rZ = globalZ;
       
       if (isPlaying) {
-        const rand = pseudoRandom(timeStepB, i + 100);
-        targetVisible = rand < mixAmount;
+        targetVisible = crossGainB > 0.01;
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
         rX = (pseudoRandom(timeStepB, i + 300) - 0.5) * Math.PI * 2;
         rY = (pseudoRandom(timeStepB, i + 400) - 0.5) * Math.PI * 2;
         rZ = (pseudoRandom(timeStepB, i + 500) - 0.5) * Math.PI * 2;
       } else {
-        targetVisible = mixAmount > 0.0;
-        targetScaleFactor = mixAmount;
+        targetVisible = crossGainB > 0.01;
+        targetScaleFactor = 1.0;
         beatScaleMult = 1.0;
         rX = 0; rY = 0; rZ = 0;
       }
-      
+
       currentScalesB[i] += (targetScaleFactor - currentScalesB[i]) * 0.15;
-      splatScene.visible = isPlaying ? targetVisible : (currentScalesB[i] > 0.01);
+      splatScene.visible = targetVisible;
       
       const scaleB = targetDist / boundsB.maxDist;
       const activeScale = Math.max(0.0001, currentScalesB[i] * scaleB * beatScaleMult);
@@ -2909,12 +3264,10 @@ async function performRealtimeUpdate() {
     // Apply fast GPU transforms and visibility to Scene C
     const totalChunksC = numChunksC + numRollChunksC;
     for (let i = 0; i < totalChunksC; i++) {
-      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
+      if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
 
-      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
-      
       let targetVisible = false;
       let targetScaleFactor = 0;
       let rX = 0, rY = 0, rZ = globalZ;
@@ -2942,12 +3295,10 @@ async function performRealtimeUpdate() {
     // Apply fast GPU transforms and visibility to Scene D
     const totalChunksD = numChunksD + numRollChunksD;
     for (let i = 0; i < totalChunksD; i++) {
-      if (viewer.splatMesh && sceneIdx >= viewer.splatMesh.getSceneCount()) break;
+      if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
 
-      const globalZ = (Date.now() * 0.0002) % (Math.PI * 2);
-      
       let targetVisible = false;
       let targetScaleFactor = 0;
       let rX = 0, rY = 0, rZ = globalZ;
@@ -3131,13 +3482,14 @@ function bindDeckEvents(deckLetter) {
       statusEl.textContent = `Loading ${file.name} to Deck ${U}...`;
       try {
         let rawScene = await loadFileToSplatData(file);
+        const defaultCount = Math.min(250000, rawScene.splatCount);
         if (slider) {
           slider.min = Math.min(250000, rawScene.splatCount);
           slider.max = rawScene.splatCount;
-          slider.value = rawScene.splatCount;
-          if (valEl) valEl.textContent = rawScene.splatCount >= 1000000 ? (rawScene.splatCount/1000000).toFixed(1) + 'M' : Math.floor(rawScene.splatCount/1000) + 'k';
+          slider.value = defaultCount;
+          if (valEl) valEl.textContent = defaultCount >= 1000000 ? (defaultCount/1000000).toFixed(1) + 'M' : Math.floor(defaultCount/1000) + 'k';
         }
-        let scene = limitSplatCount(rawScene, rawScene.splatCount);
+        let scene = limitSplatCount(rawScene, defaultCount);
         if (L === 'a') { rawSceneA = rawScene; sceneA = scene; }
         if (L === 'b') { rawSceneB = rawScene; sceneB = scene; }
         if (L === 'c') { rawSceneC = rawScene; sceneC = scene; }
