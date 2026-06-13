@@ -395,7 +395,7 @@ appDiv.innerHTML = `
         <span class="knob-label" style="margin-right:4px;">MIDI</span>
         <select id="midi-device" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
           <option value="ddj-400">DDJ-400</option>
-          <option value="ddj-flx4">DDJ-FLX4</option>
+          <option value="ddj-flx4" selected>DDJ-FLX4</option>
         </select>
         <button id="btn-midi-learn" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">MIDI LEARN</button>
         <button id="btn-midi-export" class="util-btn" style="font-size:9px; padding:2px 5px; background:#444;">EXPORT MIDI</button>

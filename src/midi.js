@@ -271,145 +271,79 @@ const PROFILES = {
   // ─────────────────────────────────────────────────────────────────────────────
   'ddj-flx4': {
     handleNoteOn(channel, note, velocity) {
-      const isDeckA = (channel === 0);
-      const isDeckB = (channel === 1);
-      const isDeck  = isDeckA || isDeckB;
-      const deckStr = isDeckA ? 'a' : 'b';
+      // ── Deck transport / loops (ch0 = Deck A, ch1 = Deck B) ──
+      if (channel === 0 || channel === 1) {
+        const deckStr = channel === 0 ? 'a' : 'b';
+        if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause
+        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue → Stop
 
-      if (isDeck) {
-        // Play/Pause — Note 11 (0x0B)
-        if (note === 11) clickButton(`btn-play-${deckStr}`, velocity);
+        // Loops (CONFIRMED via guided capture): 4-beat=77, half=81, double=83
+        if (note === 77) clickButton(`loop-active-${deckStr}`, velocity);
+        if (note === 81) clickButton(`loop-half-${deckStr}`, velocity);
+        if (note === 83) clickButton(`loop-double-${deckStr}`, velocity);
 
-        // Cue — Note 12 (0x0C) → performs Stop in the app
-        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);
-
-        // Jog touch — Note 54 (0x36): scratch mode engage — no app action needed
-        // if (note === 54) { /* scratch mode */ }
-
-        // Hot Cue pads — Notes 0-7 (0x00-0x07)
-        // TODO verify: FLX4 pads send different note numbers depending on the
-        // active pad mode (Hot Cue / Beat Loop / etc.). Confirm exact notes per
-        // pad-mode via MIDI Learn before relying on this mapping.
-        if (note >= 0 && note <= 7) {
-          triggerPad(deckStr, note, velocity);
-        }
-
-        // Loop controls
-        // TODO verify: FLX4 loop button notes — use MIDI Learn to confirm
-        if (note === 20) clickButton(`loop-active-${deckStr}`, velocity); // 4-beat loop toggle // TODO verify
-        if (note === 21) clickButton(`loop-half-${deckStr}`, velocity);   // loop /2            // TODO verify
-        if (note === 22) clickButton(`loop-double-${deckStr}`, velocity); // loop x2            // TODO verify
-
-        // Load track — Deck A: Note 70 (0x46), Deck B: Note 71 (0x47)
-        // ⚠️ Cannot open a file dialog from a MIDI event — browsers require a
-        // real user gesture (click). Calling fileInput.click() silently fails.
-        // Use the on-screen LOAD button instead; confirm notes via MIDI Learn.
-        if (isDeckA && note === 70) console.warn('[MIDI] Load Deck A triggered via MIDI — file dialog cannot be opened from MIDI event; use on-screen button.');
-        if (isDeckB && note === 71) console.warn('[MIDI] Load Deck B triggered via MIDI — file dialog cannot be opened from MIDI event; use on-screen button.');
+        // Load — ⚠️ a file dialog cannot be opened from a MIDI event (browsers
+        // require a real user gesture). Use the on-screen LOAD button.
+        if (note === 70 || note === 71) console.warn('[MIDI] Load via MIDI not possible (file dialog needs a user gesture); use the on-screen LOAD button.');
       }
 
-      // Beat FX section (ch 4)
+      // ── Performance pads (CONFIRMED: ch7 = Deck A, ch9 = Deck B; notes 0-7) ──
+      // NOTE: FLX4 pads emit different notes/channels per pad mode; this was
+      // captured in one mode. Re-capture if you switch pad modes.
+      if (channel === 7 && note >= 0 && note <= 7) triggerPad('a', note, velocity);
+      if (channel === 9 && note >= 0 && note <= 7) triggerPad('b', note, velocity);
+
+      // ── Beat FX section (ch4) ──
       if (channel === 4) {
-        // CH-select buttons: set fxTarget to 'a' (CH1), 'b' (CH2), or 'm' (MST)
-        // TODO verify: FLX4 CH-select note numbers via MIDI Learn
-        if (note === 86) { flx4FxTarget = 'a'; console.log('[MIDI] FX target → Deck A'); } // TODO verify note
-        if (note === 87) { flx4FxTarget = 'b'; console.log('[MIDI] FX target → Deck B'); } // TODO verify note
-        if (note === 88) { flx4FxTarget = 'm'; console.log('[MIDI] FX target → Master'); } // TODO verify note
+        // CH-select switch → which deck the FX section controls.
+        // CONFIRMED: CH1 → note 17, CH2 → note 16.
+        // ⚠️ MASTER reported the SAME note (17) as CH1 in capture, so it can't be
+        // auto-distinguished; 18 is an educated guess. Re-capture MASTER if it
+        // doesn't switch to the Master FX target.
+        if (note === 17) flx4FxTarget = 'a';
+        if (note === 16) flx4FxTarget = 'b';
+        if (note === 18) flx4FxTarget = 'm'; // GUESS — confirm via MIDI Learn
 
-        // Beat FX On/Off button
-        // TODO verify: FLX4 Beat FX On/Off note (ch4 Note 71 from Mixxx XML; FLX4 may differ)
-        if (note === 71) clickButton(`btn-fx-toggle-${flx4FxTarget}`, velocity); // TODO verify note
+        // Beat FX ON/OFF (CONFIRMED note 71) → toggle the target deck's FX
+        if (note === 71) clickButton(`btn-fx-toggle-${flx4FxTarget}`, velocity);
 
-        // FX-select button: cycles the FX type dropdown to the next option
-        // TODO verify: FLX4 Beat FX Select note number via MIDI Learn
-        if (note === 99) { // TODO verify note
-          if (velocity > 0) cycleSelect(`fx-select-${flx4FxTarget}`);
-        }
+        // FX SELECT (CONFIRMED note 99) → cycle the target deck's FX dropdown
+        if (note === 99 && velocity > 0) cycleSelect(`fx-select-${flx4FxTarget}`);
 
-        // Beat ‹ / › buttons: step beat division for the current FX target
-        // For decks a/b use their per-deck beat buttons; 'm' uses master beat buttons.
-        // TODO verify: FLX4 beat prev/next note numbers via MIDI Learn
-        if (note === 100) { // Beat < — TODO verify note
-          if (velocity > 0) clickButton(`btn-beat-prev-${flx4FxTarget}`, velocity);
-        }
-        if (note === 101) { // Beat > — TODO verify note
-          if (velocity > 0) clickButton(`btn-beat-next-${flx4FxTarget}`, velocity);
-        }
-      }
-
-      // Beat FX channel ch 5 (FLX4 may use ch5 for the second deck's FX On/Off)
-      // TODO verify: exact channel/note split for FLX4 Beat FX On/Off
-      if (channel === 5) {
-        if (note === 71) clickButton(`btn-fx-toggle-${flx4FxTarget}`, velocity); // TODO verify
+        // Beat ‹ / › (CONFIRMED: prev=74, next=75) → step beat division for target
+        if (note === 74 && velocity > 0) clickButton(`btn-beat-prev-${flx4FxTarget}`, velocity);
+        if (note === 75 && velocity > 0) clickButton(`btn-beat-next-${flx4FxTarget}`, velocity);
       }
     },
 
     handleCC(channel, cc, value) {
-      const isDeckA = (channel === 0);
-      const isDeckB = (channel === 1);
-      const isDeck  = isDeckA || isDeckB;
-      const deckStr = isDeckA ? 'a' : 'b';
-
-      if (isDeck) {
-        // Jog wheel vinyl turn  — CC 34 (0x22)
-        if (cc === 34) spinJog(`jog-${deckStr}`, value);
-        // Jog wheel pitch turn  — CC 35 (0x23) — same physical wheel in non-vinyl mode
-        if (cc === 35) spinJog(`jog-${deckStr}`, value);
-
-        // Tempo fader MSB — CC 0 (0x00)
+      // ── Deck controls (ch0 = A, ch1 = B) — not in guided capture; best-known. ──
+      if (channel === 0 || channel === 1) {
+        const deckStr = channel === 0 ? 'a' : 'b';
+        if (cc === 34) spinJog(`jog-${deckStr}`, value); // jog vinyl turn
+        if (cc === 35) spinJog(`jog-${deckStr}`, value); // jog pitch turn
         if (cc === 0)  mapSlider(`tempo-${deckStr}`, value);
-        // Tempo fader LSB — CC 32 (0x20) — fine resolution, skip
-
-        // EQ High — CC 39 (0x27)
         if (cc === 39) mapSlider(`eq-hi-${deckStr}`, value);
-        // EQ Mid  — CC 43 (0x2B)
         if (cc === 43) mapSlider(`eq-mid-${deckStr}`, value);
-        // EQ Low  — CC 47 (0x2F)
         if (cc === 47) mapSlider(`eq-low-${deckStr}`, value);
-
-        // Trim/Gain — CC 36 (0x24)
         if (cc === 36) mapSlider(`trim-${deckStr}`, value);
-
-        // Channel Fader (Vol) — CC 51 (0x33)
         if (cc === 51) mapSlider(`vol-${deckStr}`, value);
-
-        // Filter (per-deck) — CC 22 // TODO verify CC (FLX4 may use different)
-        if (cc === 22) mapSlider(`filter-${deckStr}`, value); // TODO verify CC
       }
 
-      // Mixer channel (ch 6)
+      // ── Mixer / master section (ch6) ──
       if (channel === 6) {
-        // Crossfader — CC 31 (0x1F)
-        if (cc === 31) mapSlider('crossfader', value);
-
-        // Filter deck A — CC 23 (0x17)
-        if (cc === 23) mapSlider('filter-a', value);
-        // Filter deck B — CC 24 (0x18)
-        if (cc === 24) mapSlider('filter-b', value);
-
-        // Master volume knob
-        // TODO verify: FLX4 master volume CC number via MIDI Learn
-        if (cc === 5) mapSlider('master-vol', value); // TODO verify CC
-
-        // Headphone MIX knob → DOF
-        // TODO verify: FLX4 headphone mix CC number via MIDI Learn
-        if (cc === 6) mapSlider('knob-dof', value); // TODO verify CC
-
-        // Headphone LEVEL knob → Lens Flare
-        // TODO verify: FLX4 headphone level CC number via MIDI Learn
-        if (cc === 7) mapSlider('knob-lensflare', value); // TODO verify CC
-
-        // Mic LEVEL knob → scrub HDRI preset
-        // Quantizes 0-127 across the #hdri-select option count so turning the
-        // mic level knob cycles through HDRI presets.
-        // TODO verify: FLX4 mic level CC number via MIDI Learn
-        if (cc === 8) mapSelectByValue('hdri-select', value); // TODO verify CC
+        if (cc === 31) mapSlider('crossfader', value);         // crossfader (best-known)
+        if (cc === 23) mapSlider('filter-a', value);           // color filter A (best-known)
+        if (cc === 24) mapSlider('filter-b', value);           // color filter B (best-known)
+        // CONFIRMED via guided capture:
+        if (cc === 8)  mapSlider('master-vol', value);         // Master volume → zoom
+        if (cc === 12) mapSlider('knob-dof', value);           // Headphone MIX → DOF
+        if (cc === 13) mapSlider('knob-lensflare', value);     // Headphone LEVEL → Flare
+        if (cc === 5)  mapSelectByValue('hdri-select', value); // Mic level → HDRI scrub
       }
 
-      // Beat FX channel (ch 4)
+      // ── Beat FX depth (ch4 CC2) → current target deck's FX depth ──
       if (channel === 4) {
-        // Beat FX Depth/Level knob — CC 2 (0x02)
-        // Routes to the currently selected fxTarget deck.
         if (cc === 2) mapSlider(`fx-depth-${flx4FxTarget}`, value);
       }
     },
@@ -423,7 +357,7 @@ let flx4FxTarget = 'a';
 
 // ── Active profile state ──────────────────────────────────────────────────────
 
-let activeProfile = 'ddj-400';
+let activeProfile = 'ddj-flx4';
 
 /**
  * Switch the active MIDI profile.
