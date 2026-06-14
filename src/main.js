@@ -226,7 +226,7 @@ appDiv.innerHTML = `
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
   <div class="hud-panel panel-left" id="deck-a">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="icon-btn" id="btn-load-a">⏏<input type="file" id="file-a" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
+      <label class="icon-btn" id="btn-load-a">⏏<input type="file" id="file-a" accept=".ply,.splat,.ksplat,.sog,.ssog,.png,.jpg,.jpeg"></label>
       <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-a-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
         <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
@@ -301,7 +301,7 @@ appDiv.innerHTML = `
   <!-- RIGHT PANEL: DECK B + CH 2 MIXER -->
   <div class="hud-panel panel-right" id="deck-b">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="icon-btn" id="btn-load-b">⏏<input type="file" id="file-b" accept=".ply,.splat,.png,.jpg,.jpeg"></label>
+      <label class="icon-btn" id="btn-load-b">⏏<input type="file" id="file-b" accept=".ply,.splat,.ksplat,.sog,.ssog,.png,.jpg,.jpeg"></label>
       <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-b-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
         <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
@@ -3274,7 +3274,127 @@ async function loadFileToSplatData(file) {
     return encodeUncompressedSplatArray(splatArray);
   }
 
-  throw new Error('Unsupported format');
+  // ── .ksplat support ───────────────────────────────────────────────────────
+  // .ksplat is mkkellogg's own compressed SplatBuffer binary format.
+  // KSplatLoader.loadFromFileData() validates the version header and constructs
+  // a SplatBuffer, which we then walk per-splat using the public accessor API.
+  if (fileName.endsWith('.ksplat')) {
+    // loadFromFileData wraps construction in a short setTimeout via delayedExecute,
+    // so we must await the returned Promise.
+    let splatBuffer;
+    try {
+      splatBuffer = await GaussianSplats3D.KSplatLoader.loadFromFileData(buffer);
+    } catch (e) {
+      console.error('[ksplat] KSplatLoader.loadFromFileData failed — version mismatch or corrupt file:', e);
+      throw new Error(`Failed to load .ksplat: ${e.message}`);
+    }
+
+    const count = splatBuffer.getSplatCount();
+    if (typeof count !== 'number' || count <= 0) {
+      throw new Error('.ksplat file contains no splats');
+    }
+
+    // Allocate the 32-byte-per-splat output buffer.
+    const out = new Uint8Array(count * 32);
+    const outView = new DataView(out.buffer);
+
+    // Reusable objects for per-splat reads (avoid per-iteration allocation).
+    const center = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    const rotation = new THREE.Quaternion();
+    const color = new THREE.Vector4();
+
+    // Verify the expected accessor methods exist at runtime so we get a clear
+    // error if the library version changes rather than a silent bad output.
+    const hasMethods = (
+      typeof splatBuffer.getSplatCenter === 'function' &&
+      typeof splatBuffer.getSplatScaleAndRotation === 'function' &&
+      typeof splatBuffer.getSplatColor === 'function'
+    );
+    if (!hasMethods) {
+      console.error('[ksplat] SplatBuffer is missing expected accessor methods (getSplatCenter / getSplatScaleAndRotation / getSplatColor). Library version may differ from 0.4.7.');
+      throw new Error('.ksplat: SplatBuffer API mismatch — check console for details');
+    }
+
+    let hasVisibleAlpha = false;
+    for (let i = 0; i < count; i++) {
+      // getSplatCenter(index, outCenter, transform=null)
+      splatBuffer.getSplatCenter(i, center, null);
+
+      // getSplatScaleAndRotation(index, outScale, outRotation, transform=null, scaleOverride=undefined)
+      splatBuffer.getSplatScaleAndRotation(i, scale, rotation, null, undefined);
+
+      // getSplatColor(index, outColor) — fills x=r, y=g, z=b, w=a as 0-255 integers
+      splatBuffer.getSplatColor(i, color);
+
+      const base = i * 32;
+
+      // Position (3 × float32, bytes 0-11)
+      outView.setFloat32(base +  0, center.x, true);
+      outView.setFloat32(base +  4, center.y, true);
+      outView.setFloat32(base +  8, center.z, true);
+
+      // Scale (3 × float32, bytes 12-23)
+      outView.setFloat32(base + 12, Number.isFinite(scale.x) ? scale.x : 0.01, true);
+      outView.setFloat32(base + 16, Number.isFinite(scale.y) ? scale.y : 0.01, true);
+      outView.setFloat32(base + 20, Number.isFinite(scale.z) ? scale.z : 0.01, true);
+
+      // Color RGBA (4 × uint8, bytes 24-27)
+      out[base + 24] = Math.max(0, Math.min(255, color.x | 0));
+      out[base + 25] = Math.max(0, Math.min(255, color.y | 0));
+      out[base + 26] = Math.max(0, Math.min(255, color.z | 0));
+      out[base + 27] = Math.max(0, Math.min(255, color.w | 0));
+      if (out[base + 27] > 0) hasVisibleAlpha = true;
+
+      // Rotation quaternion (4 × uint8, bytes 28-31)
+      // Same encoding as .splat format: [-1,1] → [0,255] via (val*0.5+0.5)*255
+      // Order stored: w, x, y, z (matching encodeUncompressedSplatArray above)
+      out[base + 28] = encodeQuaternionByte(Number.isFinite(rotation.w) ? rotation.w : 1);
+      out[base + 29] = encodeQuaternionByte(Number.isFinite(rotation.x) ? rotation.x : 0);
+      out[base + 30] = encodeQuaternionByte(Number.isFinite(rotation.y) ? rotation.y : 0);
+      out[base + 31] = encodeQuaternionByte(Number.isFinite(rotation.z) ? rotation.z : 0);
+    }
+
+    // If every splat had alpha=0 (e.g. parser left it blank), make all fully opaque.
+    if (!hasVisibleAlpha) {
+      for (let i = 0; i < count; i++) out[i * 32 + 27] = 255;
+    }
+
+    return new SplatData(out);
+  }
+
+  // ── .sog / .ssog support (PlayCanvas SOGS — STUB) ────────────────────────
+  // SOGS ("Self-Organising Gaussians") is a PlayCanvas SuperSplat compressed
+  // format.  The container bundles:
+  //   • meta.json  — splat count, chunk count, texture dimensions, min/max
+  //                  ranges for position, scale, rotation, color
+  //   • chunk_means.webp   — chunk-level mean positions (quantized)
+  //   • chunk_scales.webp  — chunk-level scale envelopes
+  //   • feat0.webp / feat1.webp — per-splat quantized attributes stored as
+  //                              WebP-encoded RGBA textures (2 textures × 4
+  //                              channels = 8 bytes per splat across chunks)
+  //
+  // The decode path would be:
+  //   1. Parse the container (zip or concatenated blob with a leading index).
+  //   2. JSON.parse(meta.json) to get { numSplats, chunks, ranges, ... }.
+  //   3. createImageBitmap(new Blob([feat0Bytes], {type:'image/webp'})) for
+  //      each texture.
+  //   4. Draw each ImageBitmap onto an OffscreenCanvas and read pixels via
+  //      getImageData.
+  //   5. For each splat i: dequantize means, scales, quats, SH from the
+  //      chunk envelope + per-splat packed values using the ranges in meta.
+  //   6. Pack into the 32-byte layout and return new SplatData(out).
+  //
+  // The exact container format (zip vs. raw blob vs. fetch-based) is not
+  // publicly documented as a single-file spec.  Please share a sample .sog /
+  // .ssog file so the container parsing step can be finalised.
+  if (fileName.endsWith('.sog') || fileName.endsWith('.ssog')) {
+    throw new Error(
+      'SOGS (.sog/.ssog) decoding is not yet wired up — please share a sample file so the container format can be confirmed and the decoder finished.'
+    );
+  }
+
+  throw new Error('Unsupported format. Supported extensions: .ply, .splat, .ksplat, .sog, .ssog, .png, .jpg, .jpeg');
 }
 
 // Old handlers removed.
@@ -3294,7 +3414,7 @@ function setupDragAndDrop(elementId, fileInput) {
     element.style.background = 'rgba(10, 10, 14, 0.6)';
     const file = e.dataTransfer.files[0];
     const n = file?.name.toLowerCase();
-    if (file && (n.endsWith('.ply') || n.endsWith('.splat') || n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg'))) {
+    if (file && (n.endsWith('.ply') || n.endsWith('.splat') || n.endsWith('.ksplat') || n.endsWith('.sog') || n.endsWith('.ssog') || n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg'))) {
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
       fileInput.files = dataTransfer.files;
