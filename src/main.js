@@ -409,7 +409,6 @@ appDiv.innerHTML = `
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
         </select>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
-        <button id="btn-midi-import" class="util-btn" style="font-size:9px; padding:2px 5px; background:#1e3a8a;">IMPORT</button>
         <input id="midi-import-file" type="file" accept="application/json,.json" style="display:none;" />
       </div>
       <div class="flex-row" style="align-items:center;">
@@ -467,7 +466,8 @@ appDiv.innerHTML = `
       <button id="midi-guide-skip"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Skip</button>
       <button id="midi-guide-confirm" style="background:#7c3aed; border:none; color:#fff; font-size:10px; padding:5px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-family:inherit;">Confirm &amp; Next</button>
       <button id="midi-guide-save"    style="background:#1e3a8a; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled>Save as profile</button>
-      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled>Finish &amp; Export</button>
+      <button id="midi-guide-import"  style="background:#1e1e2e; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Load a mapping file (.json) as a profile">⬆ Upload</button>
+      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Download this mapping as a .json file">⬇ Download</button>
     </div>
   </div>
 
@@ -1472,7 +1472,8 @@ function buildTableFromImport(json) {
 window._buildTableFromImport = buildTableFromImport;
 
 (function setupMidiImport() {
-  const btnImport = document.getElementById('btn-midi-import');
+  // Upload lives inside the Guided Map panel (merged with the mapping wizard).
+  const btnImport = document.getElementById('midi-guide-import');
   const fileInput = document.getElementById('midi-import-file');
   if (!btnImport || !fileInput) return;
 
