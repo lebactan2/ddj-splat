@@ -1,6 +1,7 @@
 import './style.css';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 import { SplatData, limitSplatCount } from './dataModel.js';
+import { decodeSog } from './sogLoader.js';
 import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
@@ -328,7 +329,7 @@ appDiv.innerHTML = `
       </div>
       <div class="flex-between" style="margin-top:4px;">
         <button class="round-btn sync" id="sync-b">SYNC</button>
-        <div class="flex-row">
+       <div class="flex-row">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-b" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
         </div>
@@ -3527,35 +3528,14 @@ async function loadFileToSplatData(file) {
     return new SplatData(out);
   }
 
-  // ── .sog / .ssog support (PlayCanvas SOGS — STUB) ────────────────────────
-  // SOGS ("Self-Organising Gaussians") is a PlayCanvas SuperSplat compressed
-  // format.  The container bundles:
-  //   • meta.json  — splat count, chunk count, texture dimensions, min/max
-  //                  ranges for position, scale, rotation, color
-  //   • chunk_means.webp   — chunk-level mean positions (quantized)
-  //   • chunk_scales.webp  — chunk-level scale envelopes
-  //   • feat0.webp / feat1.webp — per-splat quantized attributes stored as
-  //                              WebP-encoded RGBA textures (2 textures × 4
-  //                              channels = 8 bytes per splat across chunks)
-  //
-  // The decode path would be:
-  //   1. Parse the container (zip or concatenated blob with a leading index).
-  //   2. JSON.parse(meta.json) to get { numSplats, chunks, ranges, ... }.
-  //   3. createImageBitmap(new Blob([feat0Bytes], {type:'image/webp'})) for
-  //      each texture.
-  //   4. Draw each ImageBitmap onto an OffscreenCanvas and read pixels via
-  //      getImageData.
-  //   5. For each splat i: dequantize means, scales, quats, SH from the
-  //      chunk envelope + per-splat packed values using the ranges in meta.
-  //   6. Pack into the 32-byte layout and return new SplatData(out).
-  //
-  // The exact container format (zip vs. raw blob vs. fetch-based) is not
-  // publicly documented as a single-file spec.  Please share a sample .sog /
-  // .ssog file so the container parsing step can be finalised.
+  // ── .sog / .ssog support (PlayCanvas SOGS, v2) ───────────────────────────
+  // A .sog is a ZIP archive (meta.json + WebP textures). decodeSog() unzips it
+  // with fflate, decodes each needed WebP via createImageBitmap/OffscreenCanvas,
+  // dequantizes means/scales/quats/sh0 per the PlayCanvas engine v2 reader, and
+  // returns the 32-byte-per-splat layout. Higher-order SH (shN) is ignored.
   if (fileName.endsWith('.sog') || fileName.endsWith('.ssog')) {
-    throw new Error(
-      'SOGS (.sog/.ssog) decoding is not yet wired up — please share a sample file so the container format can be confirmed and the decoder finished.'
-    );
+    const out = await decodeSog(buffer);
+    return new SplatData(out);
   }
 
   throw new Error('Unsupported format. Supported extensions: .ply, .splat, .ksplat, .sog, .ssog, .png, .jpg, .jpeg');

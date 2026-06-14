@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@mkkellogg/gaussian-splats-3d": "^0.4.7",
+    "fflate": "^0.8.3",
     "three": "^0.184.0"
   }
 }
