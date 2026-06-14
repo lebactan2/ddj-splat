@@ -6,9 +6,13 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
-import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage } from './midi.js';
+import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride } from './midi.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
 window._simulateMidi = _simulateMIDIMessage;
+// Test hooks for the built-in override layer.
+window._mergeProfileOverride = mergeProfileOverride;
+window._clearProfileOverride = clearProfileOverride;
+window._getProfileOverride = getProfileOverride;
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -465,9 +469,11 @@ appDiv.innerHTML = `
       <button id="midi-guide-back"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Back</button>
       <button id="midi-guide-skip"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Skip</button>
       <button id="midi-guide-confirm" style="background:#7c3aed; border:none; color:#fff; font-size:10px; padding:5px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-family:inherit;">Confirm &amp; Next</button>
-      <button id="midi-guide-save"    style="background:#1e3a8a; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled>Save as profile</button>
-      <button id="midi-guide-import"  style="background:#1e1e2e; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Load a mapping file (.json) as a profile">⬆ Upload</button>
-      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Download this mapping as a .json file">⬇ Download</button>
+      <button id="midi-guide-apply"   style="background:#4c1d95; border:1px solid #7c3aed; color:#ddd6fe; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled title="Re-map only the controls you confirmed; keep the built-in's behavior for the rest">Apply edits</button>
+      <button id="midi-guide-reset"   style="background:#3f1d1d; border:1px solid #b91c1c; color:#fca5a5; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Remove all your edits and restore the built-in factory mapping">Reset to factory</button>
+      <button id="midi-guide-save"    style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Save the profile and download a .json backup">💾 Save profile</button>
+      <button id="midi-guide-import"  style="background:#1e1e2e; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Load a mapping file (.json) as a profile">⏏ Upload</button>
+      <button id="midi-guide-finish"  style="display:none;" disabled>Download</button>
     </div>
   </div>
 
@@ -1655,6 +1661,8 @@ window._buildTableFromImport = buildTableFromImport;
   const btnBack     = document.getElementById('midi-guide-back');
   const btnSkip     = document.getElementById('midi-guide-skip');
   const btnConfirm  = document.getElementById('midi-guide-confirm');
+  const btnApply    = document.getElementById('midi-guide-apply');
+  const btnReset    = document.getElementById('midi-guide-reset');
   const btnSave     = document.getElementById('midi-guide-save');
   const btnFinish   = document.getElementById('midi-guide-finish');
   const elProgress  = document.getElementById('midi-guide-progress');
@@ -1706,6 +1714,41 @@ window._buildTableFromImport = buildTableFromImport;
     // (not skipped).
     const hasMapped = mapping.some(m => m && !m.skipped);
     if (btnSave) btnSave.disabled = !hasMapped;
+    updateBuiltinButtons(hasMapped);
+  }
+
+  // ── Built-in edit / reset button state ──────────────────────────────────────
+  // The active profile is the #midi-device dropdown value. When it's a built-in
+  // ('ddj-400'/'ddj-flx4'), "Apply edits" and "Reset to factory" are meaningful;
+  // for custom profiles only "Save as profile" applies.
+  function activeBuiltinName() {
+    const sel = document.getElementById('midi-device');
+    const name = sel ? sel.value : null;
+    return (name && isBuiltinProfile(name)) ? name : null;
+  }
+
+  function builtinLabel(name) {
+    const found = BUILTIN_MIDI_PROFILES.find(p => p.value === name);
+    return found ? found.label : name;
+  }
+
+  function updateBuiltinButtons(hasMapped) {
+    const name = activeBuiltinName();
+    if (!btnApply || !btnReset) return;
+    if (!name) {
+      // Custom profile active → only "Save as profile" applies.
+      btnApply.style.display = 'none';
+      btnReset.style.display = 'none';
+      return;
+    }
+    btnApply.style.display = '';
+    btnReset.style.display = '';
+    btnApply.textContent = `Apply edits to ${builtinLabel(name)}`;
+    // Apply needs at least one confirmed (non-skipped) control this session.
+    btnApply.disabled = !hasMapped;
+    // Reset only meaningful when this built-in has existing overrides.
+    const hasOverride = Object.keys(getProfileOverride(name) || {}).length > 0;
+    btnReset.disabled = !hasOverride;
   }
 
   function enterStep(idx) {
@@ -1834,9 +1877,43 @@ window._buildTableFromImport = buildTableFromImport;
     } else {
       setMidiProfile(name);
     }
-    elDetected.textContent = `Saved profile "${name}" (${Object.keys(table).length} mappings) and selected it.`;
+    exportMapping(); // Save + Download are merged: also download a .json backup.
+    elDetected.textContent = `Saved profile "${name}" and downloaded a backup (${Object.keys(table).length} mappings).`;
     elDetected.style.color = '#10b981';
     closeGuide();
+  }
+
+  // ── Apply the captured session as edits to the active BUILT-IN profile ──────
+  // Re-maps only the controls confirmed this session; skipped steps keep the
+  // built-in default. Re-activates the profile so edits take effect immediately.
+  function applyEditsToBuiltin() {
+    const name = activeBuiltinName();
+    if (!name) return; // custom profile active → no-op
+    const table = buildMappingTableFromCapture();
+    if (Object.keys(table).length === 0) {
+      elDetected.textContent = '  Nothing to apply — confirm at least one control first!';
+      elDetected.style.color = '#f97316';
+      return;
+    }
+    mergeProfileOverride(name, table);
+    setMidiProfile(name); // re-activate so the override layer takes effect now
+    elDetected.textContent = `Applied ${Object.keys(table).length} edit(s) to ${builtinLabel(name)}. They take effect now.`;
+    elDetected.style.color = '#10b981';
+    updateBuiltinButtons(true);
+    closeGuide();
+  }
+
+  // ── Reset the active built-in's overrides back to factory ───────────────────
+  function resetBuiltinToFactory() {
+    const name = activeBuiltinName();
+    if (!name) return;
+    if (!Object.keys(getProfileOverride(name) || {}).length) return;
+    clearProfileOverride(name);
+    setMidiProfile(name); // re-activate clean built-in
+    elDetected.textContent = `Reset ${builtinLabel(name)} to factory mapping.`;
+    elDetected.style.color = '#a78bfa';
+    const hasMapped = mapping.some(m => m && !m.skipped);
+    updateBuiltinButtons(hasMapped);
   }
 
   // ── Button handlers ───────────────────────────────────────────────────────
@@ -1881,6 +1958,8 @@ window._buildTableFromImport = buildTableFromImport;
   });
 
   if (btnSave) btnSave.addEventListener('click', saveAsProfile);
+  if (btnApply) btnApply.addEventListener('click', applyEditsToBuiltin);
+  if (btnReset) btnReset.addEventListener('click', resetBuiltinToFactory);
 
   btnFinish.addEventListener('click', () => {
     exportMapping();
@@ -1889,6 +1968,8 @@ window._buildTableFromImport = buildTableFromImport;
 
   // Expose for smoke-testing: lets a test inject captured steps and save.
   window._midiGuideSaveAsProfile = saveAsProfile;
+  window._midiGuideApplyEdits = applyEditsToBuiltin;
+  window._midiGuideResetFactory = resetBuiltinToFactory;
   window._midiGuideSetMapping = (idx, captured) => { mapping[idx] = captured; };
   window._midiGuideSteps = GUIDE_STEPS;
 })();

@@ -611,6 +611,90 @@ export function listCustomProfiles() {
   return Object.keys(loadCustomProfiles());
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// BUILT-IN PROFILE OVERRIDE LAYER  (localStorage)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Lets the user RE-MAP individual controls of a built-in profile without losing
+// the built-in's behavior for controls they leave alone. An override is a
+// per-control table layered ON TOP of the hardcoded handler:
+//
+//   { [builtinName]: { "<type>:<channel>:<data1>": "<actionId>" } }
+//
+// At dispatch time, if the active profile is a built-in and the incoming
+// message key matches an override entry, we run that action via the generic
+// engine and SKIP the built-in handler for that message. Everything else falls
+// through to the original hardcoded behavior untouched.
+
+const OVERRIDE_STORE_KEY = 'vvj-profile-overrides';
+
+// In-memory cache of all overrides, loaded on startup via loadProfileOverrides().
+let _profileOverrides = {};
+
+/** Persist the in-memory override map to localStorage. */
+function _persistOverrides() {
+  try {
+    localStorage.setItem(OVERRIDE_STORE_KEY, JSON.stringify(_profileOverrides));
+  } catch (e) {
+    console.warn('[MIDI] Failed to persist profile overrides:', e);
+  }
+}
+
+/**
+ * Load all built-in overrides from localStorage into memory.
+ * Call once on startup. Returns the loaded map.
+ */
+export function loadProfileOverrides() {
+  try {
+    const raw = localStorage.getItem(OVERRIDE_STORE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    _profileOverrides = (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (e) {
+    console.warn('[MIDI] Failed to load profile overrides:', e);
+    _profileOverrides = {};
+  }
+  return _profileOverrides;
+}
+
+/** Get the override table for a built-in profile ({} if none). */
+export function getProfileOverride(name) {
+  const t = _profileOverrides[name];
+  return (t && typeof t === 'object') ? t : {};
+}
+
+/**
+ * Merge a partial mapping table into a built-in's override and persist.
+ * Existing entries for keys NOT in `table` are preserved; matching keys are
+ * replaced. Steps the user skipped (absent from `table`) keep the built-in
+ * default.
+ */
+export function mergeProfileOverride(name, table) {
+  if (!name || !table || typeof table !== 'object') return getProfileOverride(name);
+  const merged = { ...getProfileOverride(name), ...table };
+  _profileOverrides[name] = merged;
+  _persistOverrides();
+  console.log(`[MIDI] Merged ${Object.keys(table).length} override(s) into built-in "${name}" (total ${Object.keys(merged).length})`);
+  return merged;
+}
+
+/** Remove all overrides for a built-in profile and persist. */
+export function clearProfileOverride(name) {
+  if (name in _profileOverrides) {
+    delete _profileOverrides[name];
+    _persistOverrides();
+    console.log(`[MIDI] Cleared overrides for built-in "${name}"`);
+  }
+}
+
+/** True if `name` is one of the hardcoded built-in profiles. */
+export function isBuiltinProfile(name) {
+  return Object.prototype.hasOwnProperty.call(PROFILES, name);
+}
+
+// Eagerly hydrate overrides at module load so the dispatcher honors saved
+// re-mappings even before initMIDI() runs (e.g. in headless smoke tests).
+loadProfileOverrides();
+
 // ── Active profile state ──────────────────────────────────────────────────────
 //
 // The dispatcher uses a single resolved profile object (`activeProfileObj`) so
@@ -676,6 +760,24 @@ function getMIDIMessage(message) {
   const profile = activeProfileObj;
   if (!profile) return;
 
+  // ── Built-in override layer ───────────────────────────────────────────────
+  // If the active profile is a built-in and this control has been re-mapped,
+  // run the override action and SKIP the built-in handler for this message.
+  // Custom profiles are already fully table-driven, so they bypass this.
+  if (isBuiltinProfile(activeProfile)) {
+    const override = getProfileOverride(activeProfile);
+    if (override && Object.keys(override).length) {
+      const key = `${type}:${channel}:${data1}`;
+      const actionId = override[key];
+      if (actionId) {
+        // Note-off (velocity 0) must still reach runAction (pad/button mouseup).
+        const v = isCC ? velocity : (isNoteOn ? velocity : 0);
+        runAction(actionId, v, !isCC);
+        return; // override replaces the built-in default for this control
+      }
+    }
+  }
+
   if (isNoteOn || isNoteOff) {
     // Pass Note Off (velocity 0) so pads get mouseup events
     profile.handleNoteOn(channel, data1, isNoteOn ? velocity : 0);
@@ -717,6 +819,7 @@ export function _simulateMIDIMessage(bytes) {
 }
 
 export function initMIDI() {
+  loadProfileOverrides(); // restore any saved built-in re-mappings
   if (navigator.requestMIDIAccess) {
     navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
   } else {
