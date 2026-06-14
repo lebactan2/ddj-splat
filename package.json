@@ -1,7 +1,8 @@
 {
-  "name": "splat-cutup",
-  "version": "0.0.0",
+  "name": "vvj-splat",
+  "version": "0.1.0",
   "private": true,
+  "license": "CC-BY-4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

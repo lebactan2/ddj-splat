@@ -376,6 +376,7 @@ appDiv.innerHTML = `
   <!-- TOP PANEL: SETTINGS & UTILS -->
   <div class="hud-panel panel-top">
     <div class="flex-row" style="gap:12px;">
+      <a href="https://github.com/lebactan2/ddj-splat" target="_blank" rel="noopener" title="VVJ Splat — CC BY 4.0" style="text-decoration:none; color:#7c3aed; font-family:'Outfit',sans-serif; font-weight:900; font-size:14px; letter-spacing:1px; white-space:nowrap;">VVJ&nbsp;SPLAT</a>
       <div id="fps-counter" style="color:#10b981; font-family:monospace; font-size:14px; font-weight:bold; white-space:nowrap; min-width:60px;">0 FPS</div>
       <div id="status" style="color:#10b981; font-family:monospace; font-size:11px; font-weight:bold; max-width:180px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">Ready</div>
     </div>
