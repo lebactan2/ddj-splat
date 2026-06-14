@@ -5,7 +5,9 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
-import { initMIDI, setMidiProfile, setMidiLearn } from './midi.js';
+import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage } from './midi.js';
+// Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
+window._simulateMidi = _simulateMIDIMessage;
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -405,6 +407,8 @@ appDiv.innerHTML = `
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
         </select>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
+        <button id="btn-midi-import" class="util-btn" style="font-size:9px; padding:2px 5px; background:#1e3a8a;">IMPORT</button>
+        <input id="midi-import-file" type="file" accept="application/json,.json" style="display:none;" />
       </div>
       <div class="flex-row" style="align-items:center;">
         <span class="knob-label" style="margin-right:4px;">HDRI</span>
@@ -459,7 +463,8 @@ appDiv.innerHTML = `
       <button id="midi-guide-back"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Back</button>
       <button id="midi-guide-skip"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Skip</button>
       <button id="midi-guide-confirm" style="background:#7c3aed; border:none; color:#fff; font-size:10px; padding:5px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-family:inherit;">Confirm &amp; Next</button>
-      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled>Finish &amp; Export</button>
+      <button id="midi-guide-save"    style="background:#1e3a8a; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled>Save as profile</button>
+      <button id="midi-guide-finish"  style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled>Finish &amp; Export</button>
     </div>
   </div>
 
@@ -1222,9 +1227,115 @@ document.getElementById('hdri-select')?.addEventListener('change', (e) => {
   setHdri(e.target.value);
 });
 
+// ── MIDI profile dropdown (built-ins + saved custom profiles) ──────────────────
+const BUILTIN_MIDI_PROFILES = [
+  { value: 'ddj-400',  label: 'DDJ-400' },
+  { value: 'ddj-flx4', label: 'DDJ-FLX4' },
+];
+
+/**
+ * Re-populate the #midi-device dropdown with built-ins plus every saved custom
+ * profile. Preserves the current selection when possible.
+ * @param {string} [selectValue]  Optionally force-select this profile afterwards.
+ */
+function populateMidiDeviceDropdown(selectValue) {
+  const sel = document.getElementById('midi-device');
+  if (!sel) return;
+  const prev = selectValue || sel.value || 'ddj-flx4';
+  const customs = listCustomProfiles();
+
+  sel.innerHTML = '';
+  for (const p of BUILTIN_MIDI_PROFILES) {
+    const opt = document.createElement('option');
+    opt.value = p.value;
+    opt.textContent = p.label;
+    sel.appendChild(opt);
+  }
+  if (customs.length) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'Custom';
+    for (const name of customs) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      grp.appendChild(opt);
+    }
+    sel.appendChild(grp);
+  }
+
+  // Restore / apply selection.
+  const exists = [...sel.options].some(o => o.value === prev);
+  sel.value = exists ? prev : 'ddj-flx4';
+  if (selectValue) setMidiProfile(sel.value);
+}
+// Expose so the guided-mapping wizard can refresh + auto-select after saving.
+window._populateMidiDeviceDropdown = populateMidiDeviceDropdown;
+
 document.getElementById('midi-device')?.addEventListener('change', (e) => {
   setMidiProfile(e.target.value);
 });
+
+// Build the dropdown now that any persisted custom profiles are available.
+populateMidiDeviceDropdown();
+
+// ── Import a previously exported mapping as a named custom profile ─────────────
+// Accepts a `midi-map.json`-style file (mappings[] each with target/type/
+// channel/data1) and also a raw mapping-table object ({ "type:ch:d1": action }).
+// Returns the built mapping table (or null if nothing usable was found).
+function buildTableFromImport(json) {
+  const table = {};
+  if (json && Array.isArray(json.mappings)) {
+    for (const m of json.mappings) {
+      if (m.skipped || m.type == null || m.channel == null || m.data1 == null) continue;
+      const actionId = m.target;
+      if (!actionId || !(actionId in APP_ACTIONS)) continue; // skip unknown/state-only
+      table[`${m.type}:${m.channel}:${m.data1}`] = actionId;
+    }
+  } else if (json && typeof json === 'object') {
+    // Already a flat mapping table: { "type:ch:d1": "actionId" }
+    for (const [key, actionId] of Object.entries(json)) {
+      if (typeof actionId === 'string' && actionId in APP_ACTIONS && /^(note|cc):\d+:\d+$/.test(key)) {
+        table[key] = actionId;
+      }
+    }
+  }
+  return Object.keys(table).length ? table : null;
+}
+
+// Expose for smoke-testing.
+window._buildTableFromImport = buildTableFromImport;
+
+(function setupMidiImport() {
+  const btnImport = document.getElementById('btn-midi-import');
+  const fileInput = document.getElementById('midi-import-file');
+  if (!btnImport || !fileInput) return;
+
+  btnImport.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    fileInput.value = ''; // allow re-importing the same file later
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+      const table = buildTableFromImport(json);
+      if (!table) {
+        alert('No usable control mappings found in that file.\n\nExpected a guided-map export (midi-map.json) whose entries carry a recognised "target" action id.');
+        return;
+      }
+      const suggested = (file.name || 'imported').replace(/\.json$/i, '');
+      let name = (prompt('Import as profile named:', suggested) || '').trim();
+      if (!name) return;
+      saveCustomProfile(name, table);
+      populateMidiDeviceDropdown(name); // refresh + auto-select + activate
+      console.log(`[MIDI] Imported profile "${name}" with ${Object.keys(table).length} mappings`);
+    } catch (err) {
+      console.error('[MIDI] Import failed:', err);
+      alert('Could not read that file as JSON.');
+    }
+  });
+})();
 
 // ── MIDI-Learn overlay wiring ──────────────────────────────────────────────────
 (function setupMidiLearn() {
@@ -1317,19 +1428,22 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
 // ── Guided MIDI Mapping Wizard ─────────────────────────────────────────────────
 (function setupMidiGuide() {
   // ── Step definitions ──────────────────────────────────────────────────────
+  // `target` is the APP_ACTIONS action-id this step maps to (or null for steps
+  // that only set wizard state, e.g. the FX CH-select switches which we don't
+  // persist as a control mapping). `kind` is the UI hint for the prompt text.
   const GUIDE_STEPS = [
     { id: 'master-vol',     label: 'Master Volume → zoom',                   target: 'master-vol',        kind: 'knob'   },
     { id: 'headphone-mix',  label: 'Headphone MIX → DOF',                    target: 'knob-dof',          kind: 'knob'   },
     { id: 'headphone-level',label: 'Headphone LEVEL → Flare',                target: 'knob-lensflare',    kind: 'knob'   },
-    { id: 'mic-level',      label: 'Mic Level → HDRI cycle',                 target: 'hdri-select',       kind: 'knob'   },
-    { id: 'fx-ch-a',        label: 'Beat-FX CH SELECT → position 1 (Deck A)',target: 'fxTarget=a',        kind: 'switch' },
-    { id: 'fx-ch-b',        label: 'Beat-FX CH SELECT → position 2 (Deck B)',target: 'fxTarget=b',        kind: 'switch' },
-    { id: 'fx-ch-m',        label: 'Beat-FX CH SELECT → MASTER',             target: 'fxTarget=m',        kind: 'switch' },
-    { id: 'fx-select',      label: 'Beat-FX SELECT (turn/press)',             target: 'fx-select-cycle',   kind: 'button' },
-    { id: 'beat-prev',      label: 'Beat ‹ (left)',                      target: 'btn-beat-prev',     kind: 'button' },
-    { id: 'beat-next',      label: 'Beat › (right)',                     target: 'btn-beat-next',     kind: 'button' },
-    { id: 'fx-onoff',       label: 'Beat-FX ON/OFF',                         target: 'btn-fx-toggle',     kind: 'button' },
-    { id: 'fx-depth',       label: 'Beat-FX LEVEL/DEPTH',                    target: 'fx-depth',          kind: 'knob'   },
+    { id: 'mic-level',      label: 'Mic Level → HDRI cycle',                 target: 'hdri',              kind: 'knob'   },
+    { id: 'fx-ch-a',        label: 'Beat-FX CH SELECT → position 1 (Deck A)',target: null,                kind: 'switch' },
+    { id: 'fx-ch-b',        label: 'Beat-FX CH SELECT → position 2 (Deck B)',target: null,                kind: 'switch' },
+    { id: 'fx-ch-m',        label: 'Beat-FX CH SELECT → MASTER',             target: null,                kind: 'switch' },
+    { id: 'fx-select',      label: 'Beat-FX SELECT (turn/press) → Deck A FX', target: 'fx-select-a',       kind: 'button' },
+    { id: 'beat-prev',      label: 'Beat ‹ (left) → Deck A',            target: 'beat-prev-a',       kind: 'button' },
+    { id: 'beat-next',      label: 'Beat › (right) → Deck A',           target: 'beat-next-a',       kind: 'button' },
+    { id: 'fx-onoff',       label: 'Beat-FX ON/OFF → Deck A',                target: 'fx-toggle-a',       kind: 'button' },
+    { id: 'fx-depth',       label: 'Beat-FX LEVEL/DEPTH → Deck A',           target: 'fx-depth-a',        kind: 'knob'   },
     { id: 'loop-active-a',  label: 'Deck A 4-beat loop',                     target: 'loop-active-a',     kind: 'button' },
     { id: 'loop-half-a',    label: 'Deck A loop \xbd',                       target: 'loop-half-a',       kind: 'button' },
     { id: 'loop-double-a',  label: 'Deck A loop \xd72',                      target: 'loop-double-a',     kind: 'button' },
@@ -1374,6 +1488,7 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
   const btnBack     = document.getElementById('midi-guide-back');
   const btnSkip     = document.getElementById('midi-guide-skip');
   const btnConfirm  = document.getElementById('midi-guide-confirm');
+  const btnSave     = document.getElementById('midi-guide-save');
   const btnFinish   = document.getElementById('midi-guide-finish');
   const elProgress  = document.getElementById('midi-guide-progress');
   const elLabel     = document.getElementById('midi-guide-label');
@@ -1420,6 +1535,10 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
     if (currentStep >= N - 1 || mapping.some(Boolean)) {
       btnFinish.disabled = false;
     }
+    // Save-as-profile is available as soon as at least one control is mapped
+    // (not skipped).
+    const hasMapped = mapping.some(m => m && !m.skipped);
+    if (btnSave) btnSave.disabled = !hasMapped;
   }
 
   function enterStep(idx) {
@@ -1516,6 +1635,43 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  // ── Build a custom-profile mapping table from the captured steps ────────────
+  // Returns { "<type>:<ch>:<data1>": "<actionId>" } for every step that was
+  // captured (not skipped) AND whose target is a real APP_ACTIONS id.
+  function buildMappingTableFromCapture() {
+    const table = {};
+    GUIDE_STEPS.forEach((step, i) => {
+      const m = mapping[i];
+      if (!m || m.skipped) return;
+      const actionId = step.target;
+      if (!actionId || !(actionId in APP_ACTIONS)) return; // skip state-only steps
+      table[`${m.type}:${m.channel}:${m.data1}`] = actionId;
+    });
+    return table;
+  }
+
+  // ── Save the captured mapping as a named, reusable custom profile ───────────
+  function saveAsProfile() {
+    const table = buildMappingTableFromCapture();
+    if (Object.keys(table).length === 0) {
+      elDetected.textContent = '  Nothing mapped yet — confirm at least one control first!';
+      elDetected.style.color = '#f97316';
+      return;
+    }
+    let name = (prompt('Save MIDI profile as:', 'My Controller') || '').trim();
+    if (!name) return; // cancelled / empty
+    saveCustomProfile(name, table);
+    // Refresh the dropdown and auto-select the new profile (also sets it active).
+    if (window._populateMidiDeviceDropdown) {
+      window._populateMidiDeviceDropdown(name);
+    } else {
+      setMidiProfile(name);
+    }
+    elDetected.textContent = `Saved profile "${name}" (${Object.keys(table).length} mappings) and selected it.`;
+    elDetected.style.color = '#10b981';
+    closeGuide();
+  }
+
   // ── Button handlers ───────────────────────────────────────────────────────
   btnGuide.addEventListener('click', () => {
     if (guideOpen) closeGuide(); else openGuide();
@@ -1557,10 +1713,17 @@ document.getElementById('midi-device')?.addEventListener('change', (e) => {
     }
   });
 
+  if (btnSave) btnSave.addEventListener('click', saveAsProfile);
+
   btnFinish.addEventListener('click', () => {
     exportMapping();
     closeGuide();
   });
+
+  // Expose for smoke-testing: lets a test inject captured steps and save.
+  window._midiGuideSaveAsProfile = saveAsProfile;
+  window._midiGuideSetMapping = (idx, captured) => { mapping[idx] = captured; };
+  window._midiGuideSteps = GUIDE_STEPS;
 })();
 // Expose GUIDE_STEPS count for smoke-test assertions (34 total steps)
 window._midiGuideStepCount = 34;

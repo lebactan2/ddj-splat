@@ -401,21 +401,246 @@ const PROFILES = {
 // Changed by the CH-select buttons (1 → 'a', 2 → 'b', MST → 'm').
 let flx4FxTarget = 'a';
 
+// ═════════════════════════════════════════════════════════════════════════════
+// GENERIC MAPPING ENGINE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// APP_ACTIONS is a registry of every app control that a MIDI message can drive,
+// keyed by a stable action-id. Each entry declares a `kind` that selects which
+// helper runs it:
+//
+//   slider      → mapSlider(el, value)            continuous knobs / faders
+//   button      → clickButton(el, velocity)       momentary buttons (note-on)
+//   jog         → spinJog(el, value, scale)        relative encoders
+//   pad         → triggerPad(deck, index, vel)     performance pads (down/up)
+//   selectCycle → cycleSelect(el)                 advance a <select> on note-on
+//   selectScrub → mapSelectByValue(el, value)      knob scrubs a <select>
+//
+// A *custom profile* is just a mapping table:
+//   { "<type>:<channel>:<data1>": "<actionId>" }
+// where <type> is 'note' or 'cc'. makeCustomProfile() turns that table into a
+// { handleNoteOn, handleCC } object compatible with the built-in PROFILES.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const APP_ACTIONS = {
+  // ── Continuous sliders / knobs (Deck A & B) ──
+  'vol-a':    { kind: 'slider', el: 'vol-a' },
+  'vol-b':    { kind: 'slider', el: 'vol-b' },
+  'eq-hi-a':  { kind: 'slider', el: 'eq-hi-a' },
+  'eq-hi-b':  { kind: 'slider', el: 'eq-hi-b' },
+  'eq-mid-a': { kind: 'slider', el: 'eq-mid-a' },
+  'eq-mid-b': { kind: 'slider', el: 'eq-mid-b' },
+  'eq-low-a': { kind: 'slider', el: 'eq-low-a' },
+  'eq-low-b': { kind: 'slider', el: 'eq-low-b' },
+  'filter-a': { kind: 'slider', el: 'filter-a' },
+  'filter-b': { kind: 'slider', el: 'filter-b' },
+  'trim-a':   { kind: 'slider', el: 'trim-a' },
+  'trim-b':   { kind: 'slider', el: 'trim-b' },
+  'tempo-a':  { kind: 'slider', el: 'tempo-a' },
+  'tempo-b':  { kind: 'slider', el: 'tempo-b' },
+  'chunks-a': { kind: 'slider', el: 'chunks-slider-a' },
+  'chunks-b': { kind: 'slider', el: 'chunks-slider-b' },
+
+  // ── Global mixer / master sliders ──
+  'crossfader':     { kind: 'slider', el: 'crossfader' },
+  'master-vol':     { kind: 'slider', el: 'master-vol' },
+  'knob-dof':       { kind: 'slider', el: 'knob-dof' },
+  'knob-lensflare': { kind: 'slider', el: 'knob-lensflare' },
+
+  // ── FX depth (per deck + master) ──
+  'fx-depth-a': { kind: 'slider', el: 'fx-depth-a' },
+  'fx-depth-b': { kind: 'slider', el: 'fx-depth-b' },
+  'fx-depth-m': { kind: 'slider', el: 'fx-depth-m' },
+
+  // ── FX select dropdowns (cycle on press) ──
+  'fx-select-a': { kind: 'selectCycle', el: 'fx-select-a' },
+  'fx-select-b': { kind: 'selectCycle', el: 'fx-select-b' },
+  'fx-select-m': { kind: 'selectCycle', el: 'fx-select-m' },
+
+  // ── FX toggle buttons ──
+  'fx-toggle-a': { kind: 'button', el: 'btn-fx-toggle-a' },
+  'fx-toggle-b': { kind: 'button', el: 'btn-fx-toggle-b' },
+  'fx-toggle-m': { kind: 'button', el: 'btn-fx-toggle-m' },
+
+  // ── Beat prev/next buttons (per deck + master) ──
+  'beat-prev-a': { kind: 'button', el: 'btn-beat-prev-a' },
+  'beat-next-a': { kind: 'button', el: 'btn-beat-next-a' },
+  'beat-prev-b': { kind: 'button', el: 'btn-beat-prev-b' },
+  'beat-next-b': { kind: 'button', el: 'btn-beat-next-b' },
+  'beat-prev-m': { kind: 'button', el: 'btn-beat-prev-m' },
+  'beat-next-m': { kind: 'button', el: 'btn-beat-next-m' },
+
+  // ── Transport ──
+  'play-a': { kind: 'button', el: 'btn-play-a' },
+  'play-b': { kind: 'button', el: 'btn-play-b' },
+  'cue-a':  { kind: 'button', el: 'btn-cue-a' },
+  'cue-b':  { kind: 'button', el: 'btn-cue-b' },
+
+  // ── Loop controls ──
+  'loop-active-a': { kind: 'button', el: 'loop-active-a' },
+  'loop-half-a':   { kind: 'button', el: 'loop-half-a' },
+  'loop-double-a': { kind: 'button', el: 'loop-double-a' },
+  'loop-active-b': { kind: 'button', el: 'loop-active-b' },
+  'loop-half-b':   { kind: 'button', el: 'loop-half-b' },
+  'loop-double-b': { kind: 'button', el: 'loop-double-b' },
+
+  // ── Misc buttons ──
+  'strobe': { kind: 'button', el: 'btn-strobe' },
+
+  // ── Jog wheels ──
+  'jog-a': { kind: 'jog', el: 'jog-a', scale: 0.03 },
+  'jog-b': { kind: 'jog', el: 'jog-b', scale: 0.03 },
+
+  // ── HDRI environment scrub ──
+  'hdri': { kind: 'selectScrub', el: 'hdri-select' },
+
+  // ── Performance pads (8 per deck) ──
+  ...buildPadActions('a'),
+  ...buildPadActions('b'),
+};
+
+function buildPadActions(deck) {
+  const out = {};
+  for (let i = 0; i < 8; i++) {
+    out[`pad-${deck}-${i + 1}`] = { kind: 'pad', deck, index: i };
+  }
+  return out;
+}
+
+/**
+ * Execute a single APP_ACTION for an incoming MIDI message.
+ * @param {string} actionId  Key into APP_ACTIONS.
+ * @param {number} value     data2 of the message (velocity for notes, 0-127 for CC).
+ * @param {boolean} isNote   true for note on/off, false for CC.
+ */
+function runAction(actionId, value, isNote) {
+  const action = APP_ACTIONS[actionId];
+  if (!action) return;
+  switch (action.kind) {
+    case 'slider':
+      mapSlider(action.el, value);
+      break;
+    case 'button':
+      // Buttons fire on note-on (velocity > 0). clickButton already guards this.
+      clickButton(action.el, value);
+      break;
+    case 'jog':
+      spinJog(action.el, value, action.scale ?? 0.03);
+      break;
+    case 'pad':
+      // Pads need both down (velocity > 0) and up (velocity 0) — pass through.
+      triggerPad(action.deck, action.index, value);
+      break;
+    case 'selectCycle':
+      if (value > 0) cycleSelect(action.el);
+      break;
+    case 'selectScrub':
+      mapSelectByValue(action.el, value);
+      break;
+    default:
+      console.warn(`[MIDI] Unknown action kind "${action.kind}" for "${actionId}"`);
+  }
+}
+
+/**
+ * Build a profile object ({handleNoteOn, handleCC}) from a custom mapping table.
+ * @param {Object<string,string>} mappingTable  "<type>:<channel>:<data1>" → actionId
+ */
+export function makeCustomProfile(mappingTable) {
+  const table = mappingTable || {};
+  return {
+    handleNoteOn(channel, note, velocity) {
+      const actionId = table[`note:${channel}:${note}`];
+      if (actionId) runAction(actionId, velocity, true);
+    },
+    handleCC(channel, cc, value) {
+      const actionId = table[`cc:${channel}:${cc}`];
+      if (actionId) runAction(actionId, value, false);
+    },
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CUSTOM PROFILE STORAGE  (localStorage)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const PROFILE_STORE_KEY = 'vvj-midi-profiles';
+
+/** Load all saved custom profiles: { [name]: mappingTable }. */
+export function loadCustomProfiles() {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (e) {
+    console.warn('[MIDI] Failed to load custom profiles:', e);
+    return {};
+  }
+}
+
+/** Save (or overwrite) a custom profile by name. */
+export function saveCustomProfile(name, mappingTable) {
+  if (!name) return;
+  const all = loadCustomProfiles();
+  all[name] = mappingTable || {};
+  try {
+    localStorage.setItem(PROFILE_STORE_KEY, JSON.stringify(all));
+    console.log(`[MIDI] Saved custom profile "${name}" (${Object.keys(mappingTable || {}).length} mappings)`);
+  } catch (e) {
+    console.warn('[MIDI] Failed to save custom profile:', e);
+  }
+}
+
+/** Delete a custom profile by name. */
+export function deleteCustomProfile(name) {
+  const all = loadCustomProfiles();
+  if (name in all) {
+    delete all[name];
+    try {
+      localStorage.setItem(PROFILE_STORE_KEY, JSON.stringify(all));
+      console.log(`[MIDI] Deleted custom profile "${name}"`);
+    } catch (e) {
+      console.warn('[MIDI] Failed to delete custom profile:', e);
+    }
+  }
+}
+
+/** List the names of all saved custom profiles. */
+export function listCustomProfiles() {
+  return Object.keys(loadCustomProfiles());
+}
+
 // ── Active profile state ──────────────────────────────────────────────────────
+//
+// The dispatcher uses a single resolved profile object (`activeProfileObj`) so
+// built-in and custom profiles are handled uniformly. `activeProfile` keeps the
+// human-readable name for logging / UI.
 
 let activeProfile = 'ddj-flx4';
+let activeProfileObj = PROFILES['ddj-flx4'];
 
 /**
  * Switch the active MIDI profile.
- * @param {string} name  One of 'ddj-400' or 'ddj-flx4'.
+ * @param {string} name  A built-in ('ddj-400' | 'ddj-flx4') or a saved custom profile name.
  */
 export function setMidiProfile(name) {
-  if (!PROFILES[name]) {
-    console.warn(`[MIDI] Unknown profile "${name}". Valid profiles: ${Object.keys(PROFILES).join(', ')}`);
+  if (PROFILES[name]) {
+    activeProfile = name;
+    activeProfileObj = PROFILES[name];
+    console.log(`[MIDI] Profile switched to built-in: ${name}`);
     return;
   }
-  activeProfile = name;
-  console.log(`[MIDI] Profile switched to: ${name}`);
+
+  const customs = loadCustomProfiles();
+  if (name in customs) {
+    activeProfile = name;
+    activeProfileObj = makeCustomProfile(customs[name]);
+    console.log(`[MIDI] Profile switched to custom: ${name}`);
+    return;
+  }
+
+  console.warn(`[MIDI] Unknown profile "${name}". Built-ins: ${Object.keys(PROFILES).join(', ')}; customs: ${Object.keys(customs).join(', ') || '(none)'}`);
 }
 
 // ── MIDI message dispatcher ───────────────────────────────────────────────────
@@ -448,7 +673,7 @@ function getMIDIMessage(message) {
     });
   }
 
-  const profile = PROFILES[activeProfile];
+  const profile = activeProfileObj;
   if (!profile) return;
 
   if (isNoteOn || isNoteOff) {
@@ -480,6 +705,15 @@ function onMIDISuccess(midiAccess) {
 
 function onMIDIFailure() {
   console.error('[MIDI] Could not access MIDI devices.');
+}
+
+/**
+ * Test hook: feed a raw MIDI byte array ([status, data1, data2]) through the
+ * real dispatcher. Used by the Puppeteer smoke test since headless has no real
+ * MIDI. Routes to the active profile exactly like a hardware message would.
+ */
+export function _simulateMIDIMessage(bytes) {
+  getMIDIMessage({ data: bytes });
 }
 
 export function initMIDI() {
