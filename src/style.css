@@ -24,6 +24,17 @@ body, html {
   pointer-events: auto;
 }
 
+/* ── Google Map background layer ──────────────────────────────────────────── */
+/* Sits behind #viewer-container (z-index 1) so splats composite over the map. */
+#map-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none; /* orbit controls take priority by default */
+  display: none;        /* hidden until google-map preset is active */
+  background: #111;     /* fallback while iframe loads */
+}
+
 /* ── Responsive layout variables ──────────────────────
    --deck-w fluidly scales the side deck columns with viewport width.
    Bar offsets are derived from it so the top/bottom bars always meet

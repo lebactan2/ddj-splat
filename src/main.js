@@ -416,6 +416,7 @@ appDiv.innerHTML = `
         <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer;">
           <option value="none">NONE</option><option value="sunset">SUNSET</option><option value="studio">STUDIO</option>
           <option value="night">NIGHT</option><option value="forest">FOREST</option>
+          <option value="google-map">GOOGLE MAP</option>
           <option value="custom-url">URL...</option><option value="local-file">FILE...</option>
         </select>
       </div>
@@ -626,6 +627,27 @@ const fxDHtml = fxBoxBEl.outerHTML
   .replace(/DECK B/gi, 'DECK D')
   .replace(/id="fx-box-d"/, 'id="fx-box-d" style="display:none;"');
 document.getElementById('fx-decks-right').insertAdjacentHTML('beforeend', fxDHtml);
+
+// ── Google Map layer & interact button ───────────────────────────────────────
+// #map-layer sits as FIRST child of #app (z-index:0), behind #viewer-container
+// (z-index:1). By default it is hidden and has pointer-events:none.
+{
+  const mapLayerEl = document.createElement('div');
+  mapLayerEl.id = 'map-layer';
+  appDiv.insertBefore(mapLayerEl, appDiv.firstChild);
+
+  // MAP ✋ button — injected into the top panel flex-row (right side area)
+  const mapInteractBtn = document.createElement('button');
+  mapInteractBtn.id = 'btn-map-interact';
+  mapInteractBtn.className = 'util-btn';
+  mapInteractBtn.textContent = 'MAP ✋';
+  mapInteractBtn.title = 'Toggle map pan/zoom (disables splat orbit while active)';
+  // Insert it just before the right-side btn group in the top panel
+  const btnOutput = document.querySelector('#btn-output');
+  if (btnOutput && btnOutput.parentElement) {
+    btnOutput.parentElement.insertBefore(mapInteractBtn, btnOutput);
+  }
+}
 
 // Layout Toggle Logic
 const btnLayoutToggle = document.getElementById('btn-layout-toggle');
@@ -1104,6 +1126,98 @@ const hdriPresets = {
   forest: 'hdri/forest.hdr',
 };
 
+// ── Google Map layer helpers ─────────────────────────────────────────────────
+let mapInteractActive = false;
+
+function _getMapLayerEl() { return document.getElementById('map-layer'); }
+function _getViewerContainerEl() { return document.getElementById('viewer-container'); }
+function _getMapInteractBtn() { return document.getElementById('btn-map-interact'); }
+
+/** Hide the Google Map layer and restore normal viewer-container behaviour. */
+function hideGoogleMap() {
+  const layer = _getMapLayerEl();
+  const vc = _getViewerContainerEl();
+  if (layer) {
+    layer.style.display = 'none';
+    layer.style.pointerEvents = 'none';
+    // Blank the iframe so it stops loading/streaming
+    const ifrm = layer.querySelector('iframe');
+    if (ifrm) {
+      try { ifrm.src = 'about:blank'; } catch(_) {}
+      ifrm.remove();
+    }
+  }
+  if (vc) {
+    vc.style.background = '#050508';
+    vc.style.pointerEvents = 'auto';
+  }
+  // Reset interact toggle
+  mapInteractActive = false;
+  const btn = _getMapInteractBtn();
+  if (btn) btn.classList.remove('active');
+}
+
+/** Show the Google Map layer with an embedded iframe for the given key+place. */
+function showGoogleMap(apiKey, place) {
+  const layer = _getMapLayerEl();
+  const vc = _getViewerContainerEl();
+  if (!layer) return;
+
+  // Remove any existing iframe first
+  const existing = layer.querySelector('iframe');
+  if (existing) {
+    try { existing.src = 'about:blank'; } catch(_) {}
+    existing.remove();
+  }
+
+  const src = `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(place)}`;
+  const ifrm = document.createElement('iframe');
+  ifrm.src = src;
+  ifrm.title = 'Google Map';
+  ifrm.setAttribute('allowfullscreen', '');
+  ifrm.setAttribute('loading', 'lazy');
+  ifrm.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
+  ifrm.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;';
+  layer.appendChild(ifrm);
+
+  layer.style.display = 'block';
+  layer.style.pointerEvents = 'none'; // default: orbit controls on top
+
+  if (vc) {
+    vc.style.background = 'transparent';
+    // pointer-events stays auto so splat orbit still works by default
+    vc.style.pointerEvents = 'auto';
+  }
+}
+
+// Wire up the MAP ✋ interact toggle button
+document.addEventListener('DOMContentLoaded', () => {}, false); // no-op guard
+(function wireMapInteractBtn() {
+  // Button may not yet exist if this runs before DOM is fully built;
+  // use event delegation via document to be safe.
+  document.addEventListener('click', (e) => {
+    if (!e.target || e.target.id !== 'btn-map-interact') return;
+    const layer = _getMapLayerEl();
+    const vc = _getViewerContainerEl();
+    // Only meaningful when the map layer is actually visible
+    if (!layer || layer.style.display === 'none' || !layer.querySelector('iframe')) return;
+
+    mapInteractActive = !mapInteractActive;
+    const btn = _getMapInteractBtn();
+    if (mapInteractActive) {
+      // Let the iframe receive pointer events; disable splat orbit
+      layer.style.pointerEvents = 'auto';
+      if (vc) vc.style.pointerEvents = 'none';
+      if (btn) btn.classList.add('active');
+    } else {
+      // Restore splat orbit
+      layer.style.pointerEvents = 'none';
+      if (vc) vc.style.pointerEvents = 'auto';
+      if (btn) btn.classList.remove('active');
+    }
+  });
+})();
+
 async function loadHdriFromUrl(url) {
   if (!viewer || !viewer.renderer) return;
   
@@ -1165,6 +1279,11 @@ function reapplyHdri() {
 }
 
 async function setHdri(preset) {
+  // Leaving any non-google-map preset: always tear down the map layer
+  if (preset !== 'google-map') {
+    hideGoogleMap();
+  }
+
   if (preset === 'none') {
     if (viewer && viewer.threeScene) {
       if (viewer.threeScene.background && typeof viewer.threeScene.background.dispose === 'function') {
@@ -1183,7 +1302,52 @@ async function setHdri(preset) {
     }
     return;
   }
-  
+
+  if (preset === 'google-map') {
+    // 1. Clear any HDRI background so the Three scene is transparent
+    if (viewer && viewer.threeScene) {
+      if (viewer.threeScene.background && typeof viewer.threeScene.background.dispose === 'function') {
+        viewer.threeScene.background.dispose();
+      }
+      viewer.threeScene.background = null;
+      viewer.threeScene.environment = null;
+    }
+    if (currentHdriTexture) { currentHdriTexture.dispose(); currentHdriTexture = null; }
+    if (currentHdriEnv)     { currentHdriEnv.dispose();     currentHdriEnv = null; }
+
+    // 2. Resolve API key: localStorage → VITE env var → prompt
+    let apiKey = localStorage.getItem('vvj-gmaps-key') || (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_GOOGLE_MAPS_KEY) || '';
+    if (!apiKey) {
+      const entered = prompt(
+        'Paste your Google Maps Embed API key:\n' +
+        '(Get one free at console.cloud.google.com → Maps Embed API)\n' +
+        'It will be stored in localStorage.'
+      );
+      if (!entered || !entered.trim()) {
+        const select = document.getElementById('hdri-select');
+        if (select) select.value = 'none';
+        if (statusEl) statusEl.textContent = 'Google Map: no API key — cancelled';
+        return;
+      }
+      apiKey = entered.trim();
+      localStorage.setItem('vvj-gmaps-key', apiKey);
+    }
+
+    // 3. Resolve place
+    let place = localStorage.getItem('vvj-gmaps-place');
+    if (!place) {
+      const entered = prompt('Enter a place or lat,lng for the map (e.g. "Tokyo" or "35.6762,139.6503"):', 'Tokyo');
+      place = (entered && entered.trim()) ? entered.trim() : 'Tokyo';
+      localStorage.setItem('vvj-gmaps-place', place);
+    }
+
+    // 4. Show the map
+    showGoogleMap(apiKey, place);
+
+    if (statusEl) statusEl.textContent = `Map: ${place} — click MAP ✋ to pan`;
+    return;
+  }
+
   if (preset === 'custom-url') {
     const url = prompt("Enter HDRI URL (.hdr):");
     if (!url) {
@@ -1194,7 +1358,7 @@ async function setHdri(preset) {
     await loadHdriFromUrl(url);
     return;
   }
-  
+
   if (preset === 'local-file') {
     let fileInput = document.getElementById('hdri-file-input');
     if (!fileInput) {
@@ -1218,7 +1382,7 @@ async function setHdri(preset) {
     fileInput.click();
     return;
   }
-  
+
   const url = hdriPresets[preset];
   if (!url) return;
   await loadHdriFromUrl(url);
