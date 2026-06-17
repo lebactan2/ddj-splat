@@ -4305,6 +4305,7 @@ async function performRealtimeUpdate() {
       if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
+      if (!sceneA) { splatScene.visible = false; continue; } // deck unloaded — hide lingering scenes
 
       let targetVisible = false;
       let targetScaleFactor = 0;
@@ -4371,6 +4372,7 @@ async function performRealtimeUpdate() {
     for (let i = 0; i < totalChunksB; i++) {
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
+      if (!sceneB) { splatScene.visible = false; continue; } // deck unloaded — hide lingering scenes
 
       let targetVisible = false;
       let targetScaleFactor = 0;
@@ -4431,6 +4433,7 @@ async function performRealtimeUpdate() {
       if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
+      if (!sceneC) { splatScene.visible = false; continue; } // deck unloaded — hide lingering scenes
 
       let targetVisible = false;
       let targetScaleFactor = 0;
@@ -4469,6 +4472,7 @@ async function performRealtimeUpdate() {
       if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
+      if (!sceneD) { splatScene.visible = false; continue; } // deck unloaded — hide lingering scenes
 
       let targetVisible = false;
       let targetScaleFactor = 0;
@@ -4709,9 +4713,11 @@ function bindDeckEvents(deckLetter) {
         if (fileNameEl) fileNameEl.textContent = 'No file';
         btnLoad.classList.remove('loaded');
         if (fileInput) fileInput.value = '';
-        statusEl.textContent = `Scene ${U} unloaded. Rendering...`;
-        await rebuildViewerBuffers();
+        // Fast unload: don't dispose/recreate the viewer or re-encode the other
+        // decks — the now-null scene is hidden by the per-deck loop guard. (The
+        // GPU buffers linger until the next load triggers a rebuild.)
         statusEl.textContent = `Scene ${U} unloaded.`;
+        triggerRealtimeUpdate();
       }
     });
   }
