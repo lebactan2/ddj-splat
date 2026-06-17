@@ -180,6 +180,121 @@ let isScratchingD = false;
 // XZ nudge translation from physical jog side-ring (decays to zero each frame)
 let nudgeXA = 0, nudgeXB = 0;
 
+// ── Camera Rig ─────────────────────────────────────────
+// The camera always looks at the origin. Each deck has a target view in
+// spherical coords (azimuth around world-Y, elevation). The crossfader blends
+// the two deck targets; the applied "current" angles ease toward that blend.
+// Radius is always baseFramedDistance * master-vol zoom (see centerCamera).
+const HALF_PI = Math.PI / 2;
+const CAM_PRESETS = [
+  { az: 0,                  el: 0,            label: 'FRONT' },
+  { az: Math.PI,            el: 0,            label: 'BACK'  },
+  { az: -HALF_PI,           el: 0,            label: 'L'     },
+  { az: HALF_PI,            el: 0,            label: 'R'     },
+  { az: 0,                  el: HALF_PI * 0.98, label: 'TOP' },
+  { az: 0,                  el: -HALF_PI * 0.98, label: 'BOT' },
+  { az: -Math.PI / 4,       el: Math.PI / 6,  label: '¾L'    },
+  { az: Math.PI / 4,        el: Math.PI / 6,  label: '¾R'    },
+];
+// Per-deck view targets (start at FRONT). jogAzA/B is the continuous turntable
+// orbit contribution added by the jog wheels (separate so RESET VIEW can zero it).
+let camA = { azimuth: 0, elevation: 0 };
+let camB = { azimuth: 0, elevation: 0 };
+let jogAzA = 0, jogAzB = 0;
+// Eased applied angles actually written to the camera each frame.
+let camCurrent = { azimuth: 0, elevation: 0 };
+let camRigInitialized = false;
+const CAM_EASE = 0.12;          // exponential smoothing factor (ease-in/out)
+const CAM_SETTLE_EPS = 0.0006;  // below this the rig is considered settled
+let camRigSettling = false;     // keep-alive flag for the animation loop
+
+// Shortest-arc azimuth lerp (handles wraparound across ±PI).
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+// Reusable origin for camera.lookAt.
+const _camOrigin = new THREE.Vector3(0, 0, 0);
+
+// Set a deck's target view to a preset (used by on-screen pads + MIDI cam actions).
+function setDeckCamPreset(isDeckA, index) {
+  const p = CAM_PRESETS[index];
+  if (!p) return;
+  if (isDeckA) { camA.azimuth = p.az; camA.elevation = p.el; }
+  else         { camB.azimuth = p.az; camB.elevation = p.el; }
+  splashFactor = 1.8;
+  camRigSettling = true;
+  startAnimationLoop();
+  triggerRealtimeUpdate();
+}
+// Expose for MIDI cam actions.
+window._setDeckCamPreset = setDeckCamPreset;
+
+// Per-frame: blend the two deck targets by the crossfader, then ease the
+// applied current angles toward that blended target and position the camera.
+function updateCameraRig(mixAmount) {
+  if (!viewer || !viewer.controls || !viewer.camera) return;
+
+  // Keep OrbitControls mouse-rotate from fighting the rig (zoom still works).
+  if (viewer.controls.enableRotate !== false) viewer.controls.enableRotate = false;
+
+  // Effective per-deck targets include the jog turntable orbit contribution.
+  const aAz = camA.azimuth + jogAzA;
+  const bAz = camB.azimuth + jogAzB;
+
+  // Single-deck guard: only blend toward a deck that is actually loaded.
+  let tgtAz, tgtEl;
+  if (sceneA && sceneB) {
+    tgtAz = lerpAngle(aAz, bAz, mixAmount);
+    tgtEl = camA.elevation + (camB.elevation - camA.elevation) * mixAmount;
+  } else if (sceneB && !sceneA) {
+    tgtAz = bAz; tgtEl = camB.elevation;
+  } else {
+    tgtAz = aAz; tgtEl = camA.elevation;
+  }
+
+  if (!camRigInitialized) {
+    camCurrent.azimuth = tgtAz;
+    camCurrent.elevation = tgtEl;
+    camRigInitialized = true;
+  } else {
+    camCurrent.azimuth = lerpAngle(camCurrent.azimuth, tgtAz, CAM_EASE);
+    camCurrent.elevation += (tgtEl - camCurrent.elevation) * CAM_EASE;
+  }
+
+  // Settled? (used as an animation-loop keep-alive while easing.)
+  let dAz = tgtAz - camCurrent.azimuth;
+  while (dAz > Math.PI) dAz -= Math.PI * 2;
+  while (dAz < -Math.PI) dAz += Math.PI * 2;
+  const dEl = tgtEl - camCurrent.elevation;
+  camRigSettling = (Math.abs(dAz) > CAM_SETTLE_EPS || Math.abs(dEl) > CAM_SETTLE_EPS);
+
+  // Radius = current framed distance honouring master-vol zoom.
+  let zoomFactor = 1.0;
+  if (masterVol) {
+    const t = Number(masterVol.value) / 100;
+    zoomFactor = Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
+  }
+  const radius = baseFramedDistance * zoomFactor;
+
+  // Spherical → cartesian around origin (azimuth about world-Y, elevation up/down).
+  const ce = Math.cos(camCurrent.elevation);
+  const x = radius * ce * Math.sin(camCurrent.azimuth);
+  const y = radius * Math.sin(camCurrent.elevation);
+  const z = radius * ce * Math.cos(camCurrent.azimuth);
+
+  viewer.camera.position.set(x, y, z);
+  if (viewer.controls.target) viewer.controls.target.set(0, 0, 0);
+  viewer.camera.lookAt(_camOrigin);
+  viewer.controls.update();
+}
+window._camRig = { camA, camB, get current() { return camCurrent; },
+  get jogA() { return jogAzA; }, get jogB() { return jogAzB; },
+  setPreset: setDeckCamPreset };
+
 // DDJ Shift button state (held = extended tempo range)
 window._ddjShiftA = false;
 window._ddjShiftB = false;
@@ -296,10 +411,10 @@ appDiv.innerHTML = `
     </div>
 
     <div class="pads-grid" id="pads-a">
-      <button class="pad-btn" data-pad="0">1/8</button><button class="pad-btn" data-pad="1">1/4</button>
-      <button class="pad-btn" data-pad="2">1/2</button><button class="pad-btn" data-pad="3">1</button>
-      <button class="pad-btn" data-pad="4">2</button><button class="pad-btn" data-pad="5">4</button>
-      <button class="pad-btn" data-pad="6">8</button><button class="pad-btn" data-pad="7">16</button>
+      <button class="pad-btn" data-pad="0">FRONT</button><button class="pad-btn" data-pad="1">BACK</button>
+      <button class="pad-btn" data-pad="2">L</button><button class="pad-btn" data-pad="3">R</button>
+      <button class="pad-btn" data-pad="4">TOP</button><button class="pad-btn" data-pad="5">BOT</button>
+      <button class="pad-btn" data-pad="6">¾L</button><button class="pad-btn" data-pad="7">¾R</button>
     </div>
   </div>
 
@@ -371,10 +486,10 @@ appDiv.innerHTML = `
     </div>
 
     <div class="pads-grid" id="pads-b">
-      <button class="pad-btn" data-pad="0">1/8</button><button class="pad-btn" data-pad="1">1/4</button>
-      <button class="pad-btn" data-pad="2">1/2</button><button class="pad-btn" data-pad="3">1</button>
-      <button class="pad-btn" data-pad="4">2</button><button class="pad-btn" data-pad="5">4</button>
-      <button class="pad-btn" data-pad="6">8</button><button class="pad-btn" data-pad="7">16</button>
+      <button class="pad-btn" data-pad="0">FRONT</button><button class="pad-btn" data-pad="1">BACK</button>
+      <button class="pad-btn" data-pad="2">L</button><button class="pad-btn" data-pad="3">R</button>
+      <button class="pad-btn" data-pad="4">TOP</button><button class="pad-btn" data-pad="5">BOT</button>
+      <button class="pad-btn" data-pad="6">¾L</button><button class="pad-btn" data-pad="7">¾R</button>
     </div>
   </div>
 
@@ -427,6 +542,7 @@ appDiv.innerHTML = `
     </div>
 
     <div class="flex-row" style="gap:8px; border-left:1px solid rgba(255,255,255,0.1); padding-left:16px;">
+      <button id="btn-reset-orient" class="util-btn">RESET VIEW</button>
       <button id="btn-reset" class="util-btn">RESET</button>
       <button id="btn-export" class="util-btn">EXPORT</button>
       <button id="btn-output" class="util-btn">OUTPUT →</button>
@@ -2303,50 +2419,63 @@ btnStopB.addEventListener('click', () => {
 });
 
 // ── performance Pads (Hot Cues) ────────────────────────
+// ── Loop pads (physical MIDI hot-cue pads stay loops) ──────────────────────
+// The on-screen pads were repurposed for camera viewpoints, so the loop
+// behaviour lives in these standalone functions. The MIDI `pad-*` actions call
+// these directly (see midi.js triggerPad → window._setDeckLoop), so physical
+// hot-cue pads keep firing loops as before.
+const PAD_LOOP_LENGTHS = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]; // beats
+function setDeckLoopDown(isDeckA, index) {
+  if (!sceneA) return;
+  const len = PAD_LOOP_LENGTHS[index] ?? 1;
+  if (isDeckA) {
+    loopActiveA = true;
+    loopStartA = Math.floor((playAngleA + jogAngleA) * 15.0);
+    loopLengthA = Math.max(1, Math.floor(15.0 * len));
+  } else {
+    loopActiveB = true;
+    loopStartB = Math.floor((playAngleB + jogAngleB) * 15.0);
+    loopLengthB = Math.max(1, Math.floor(15.0 * len));
+  }
+  splashFactor = 1.8;
+  triggerRealtimeUpdate();
+}
+function setDeckLoopUp(isDeckA) {
+  if (isDeckA) {
+    if (!isAutoLoopA) loopActiveA = false;
+    else {
+      loopLengthA = Math.max(1, Math.floor(15.0 * autoLoopLengthA));
+      loopStartA = Math.floor((playAngleA + jogAngleA) * 15.0);
+    }
+  } else {
+    if (!isAutoLoopB) loopActiveB = false;
+    else {
+      loopLengthB = Math.max(1, Math.floor(15.0 * autoLoopLengthB));
+      loopStartB = Math.floor((playAngleB + jogAngleB) * 15.0);
+    }
+  }
+}
+// Expose for MIDI physical hot-cue pads.
+window._setDeckLoop = (deckStr, index, down) => {
+  const isDeckA = (deckStr === 'a');
+  if (down) setDeckLoopDown(isDeckA, index);
+  else setDeckLoopUp(isDeckA);
+};
+
+// On-screen pads now set the deck's camera VIEWPOINT preset (the rig eases to it).
 function setupPads(padsContainerId, isDeckA) {
   const padButtons = Array.from(document.querySelectorAll(`#${padsContainerId} .pad-btn`));
   padButtons.forEach((pad, index) => {
     pad.addEventListener('mousedown', () => {
       if (!sceneA) return;
-      
       pad.classList.add('active');
-      const loopLengths = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]; // Loop sizes in beats
-      
-      if (isDeckA) {
-        loopActiveA = true;
-        loopStartA = Math.floor((playAngleA + jogAngleA) * 15.0);
-        loopLengthA = Math.max(1, Math.floor(15.0 * loopLengths[index]));
-      } else {
-        loopActiveB = true;
-        loopStartB = Math.floor((playAngleB + jogAngleB) * 15.0);
-        loopLengthB = Math.max(1, Math.floor(15.0 * loopLengths[index]));
-      }
-      
-      // Trigger geometry flash splash
-      splashFactor = 1.8;
-      
-      triggerRealtimeUpdate();
+      // Highlight only the active viewpoint within this deck's grid.
+      padButtons.forEach(p => { if (p !== pad) p.classList.remove('active'); });
+      setDeckCamPreset(isDeckA, index);
     });
-    
-    const releaseLoop = () => {
-      pad.classList.remove('active');
-      if (isDeckA) {
-        if (!isAutoLoopA) loopActiveA = false;
-        else {
-            loopLengthA = Math.max(1, Math.floor(15.0 * autoLoopLengthA));
-            loopStartA = Math.floor((playAngleA + jogAngleA) * 15.0);
-        }
-      } else {
-        if (!isAutoLoopB) loopActiveB = false;
-        else {
-            loopLengthB = Math.max(1, Math.floor(15.0 * autoLoopLengthB));
-            loopStartB = Math.floor((playAngleB + jogAngleB) * 15.0);
-        }
-      }
-    };
-    
-    pad.addEventListener('mouseup', releaseLoop);
-    pad.addEventListener('mouseleave', releaseLoop);
+    const release = () => pad.classList.remove('active');
+    pad.addEventListener('mouseup', release);
+    pad.addEventListener('mouseleave', release);
   });
 }
 setupPads('pads-a', true);
@@ -2418,11 +2547,16 @@ function setupJogWheel(jogEl, onSpin, onRelease) {
   });
 }
 
+// Jog wheels now orbit the CAMERA (turntable spin around the up-axis): each
+// spin adds a continuous azimuth delta to that deck's camera target. The object
+// no longer rotates with the jog (it keeps only its playback spin).
 setupJogWheel(
   document.querySelector('#jog-a'),
   (delta) => {
     isScratchingA = true;
-    jogAngleA += delta;
+    jogAzA += delta;
+    camRigSettling = true;
+    startAnimationLoop();
     triggerRealtimeUpdate();
   },
   () => {
@@ -2435,7 +2569,9 @@ setupJogWheel(
   document.querySelector('#jog-b'),
   (delta) => {
     isScratchingB = true;
-    jogAngleB += delta;
+    jogAzB += delta;
+    camRigSettling = true;
+    startAnimationLoop();
     triggerRealtimeUpdate();
   },
   () => {
@@ -2561,18 +2697,26 @@ function startAnimationLoop() {
         strobeEngaged) {
       needsUpdate = true;
     }
-    
+
+    // Keep the rig easing while it hasn't settled (pad/jog set a new target).
+    // Drive the (lightweight) rig directly here every frame so easing is smooth
+    // and independent of the realtime-update coalescing/throttling.
+    if (camRigSettling && viewer) {
+      updateCameraRig(Number(crossfader.value) / 100);
+      needsUpdate = true;
+    }
+
     if (needsUpdate) {
       triggerRealtimeUpdate();
     }
-    
+
     animationFrameId = requestAnimationFrame(loop);
   };
   animationFrameId = requestAnimationFrame(loop);
 }
 
 function stopAnimationLoop() {
-  if (!isPlayingA && !isPlayingB && splashFactor <= 1.0 && !strobeEngaged &&
+  if (!isPlayingA && !isPlayingB && splashFactor <= 1.0 && !strobeEngaged && !camRigSettling &&
       (!fxEngagedA || (fxActiveA !== 'flanger' && fxActiveA !== 'trans')) &&
       (!fxEngagedB || (fxActiveB !== 'flanger' && fxActiveB !== 'trans')) &&
       (!fxEngagedM || (fxActiveM !== 'flanger' && fxActiveM !== 'trans'))) {
@@ -3858,6 +4002,11 @@ async function performRealtimeUpdate() {
     // Applied as a smooth per-deck opacity so the opposite deck fully fades out.
     const crossGainA = Math.cos(mixAmount * Math.PI / 2);
     const crossGainB = Math.sin(mixAmount * Math.PI / 2);
+
+    // Camera rig: blend deck view targets by the crossfader, ease, and position
+    // the camera looking at the origin (radius honours master-vol zoom).
+    updateCameraRig(mixAmount);
+
     const isPlaying = isPlayingA || isPlayingB || isScratchingA || isScratchingB;
     
     const jogTotal = jogAngleA + jogAngleB;
@@ -4139,7 +4288,7 @@ async function performRealtimeUpdate() {
          finalScale = 1.0; // frozen scale
       }
       
-      const angleA = effectiveAngleA + jogAngleA;
+      const angleA = effectiveAngleA; // jog now orbits the camera, not the object
       _scratchEuler.set(rX, rY, rZ);
       _scratchQRandom.setFromEuler(_scratchEuler);
       _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
@@ -4193,7 +4342,7 @@ async function performRealtimeUpdate() {
          finalScale = 1.0; // frozen scale
       }
 
-      const angleB = effectiveAngleB + jogAngleB;
+      const angleB = effectiveAngleB; // jog now orbits the camera, not the object
       _scratchEuler.set(rX, rY, rZ);
       _scratchQRandom.setFromEuler(_scratchEuler);
       _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
@@ -4273,6 +4422,36 @@ async function performRealtimeUpdate() {
   }
 }
 
+// ── Reset Orientation (RESET VIEW) ─────────────────────
+// Returns both decks' camera to the default FRONT preset, zeroes the jog orbit
+// contribution and the object rotation, and reframes at the default distance.
+const btnResetOrient = document.getElementById('btn-reset-orient');
+if (btnResetOrient) {
+  btnResetOrient.addEventListener('click', () => {
+    const front = CAM_PRESETS[0];
+    camA.azimuth = front.az; camA.elevation = front.el;
+    camB.azimuth = front.az; camB.elevation = front.el;
+    jogAzA = 0; jogAzB = 0;
+    // Snap the eased current angles straight to front (no slow orbit-around).
+    camCurrent.azimuth = front.az;
+    camCurrent.elevation = front.el;
+    camRigInitialized = true;
+    camRigSettling = false;
+    // Zero the object playback/jog rotation so geometry returns to upright.
+    playAngleA = 0; playAngleB = 0;
+    jogAngleA = 0; jogAngleB = 0;
+    // Reframe at the default distance (re-derives baseFramedDistance + applies zoom).
+    if (typeof centerCamera === 'function') centerCamera();
+    // Clear active pad highlights.
+    document.querySelectorAll('#pads-a .pad-btn.active, #pads-b .pad-btn.active')
+      .forEach(el => el.classList.remove('active'));
+    // Reposition immediately from the rig and redraw.
+    updateCameraRig(Number(crossfader.value) / 100);
+    triggerRealtimeUpdate();
+    if (statusEl) statusEl.textContent = 'View reset to FRONT.';
+  });
+}
+
 // ── Reset ──────────────────────────────────────────────
 btnReset.addEventListener('click', async () => {
   // 1. Reset every range input to its HTML default value.
@@ -4325,6 +4504,12 @@ btnReset.addEventListener('click', async () => {
   isPlayingC = false; isPlayingD = false;
   playAngleA = 0; playAngleB = 0; playAngleC = 0; playAngleD = 0;
   jogAngleA = 0; jogAngleB = 0; jogAngleC = 0; jogAngleD = 0;
+  // Reset the camera rig to FRONT.
+  camA.azimuth = CAM_PRESETS[0].az; camA.elevation = CAM_PRESETS[0].el;
+  camB.azimuth = CAM_PRESETS[0].az; camB.elevation = CAM_PRESETS[0].el;
+  jogAzA = 0; jogAzB = 0;
+  camCurrent.azimuth = CAM_PRESETS[0].az; camCurrent.elevation = CAM_PRESETS[0].el;
+  camRigInitialized = false; camRigSettling = false;
   if (currentScalesA) currentScalesA.fill(0);
   if (currentScalesB) currentScalesB.fill(0);
   if (currentScalesC) currentScalesC.fill(0);

@@ -146,8 +146,16 @@ function spinJog(elementId, midiValue, scale = 0.03) {
   jogEl.dispatchEvent(new CustomEvent('jogspin', { detail: { delta: radianDelta } }));
 }
 
-/** Trigger a pad button (hot cue / beat jump pad). */
+/**
+ * Trigger a physical hot-cue pad → LOOP (the on-screen pads were repurposed for
+ * camera viewpoints, so we call the loop helper main.js exposes instead of
+ * clicking the DOM pad). Falls back to the DOM pad if the hook isn't present.
+ */
 function triggerPad(deckStr, padIndex, velocity) {
+  if (typeof window !== 'undefined' && typeof window._setDeckLoop === 'function') {
+    window._setDeckLoop(deckStr, padIndex, velocity > 0);
+    return;
+  }
   const padsGrid = document.getElementById(`pads-${deckStr}`);
   if (!padsGrid) return;
   const padBtns = padsGrid.querySelectorAll('.pad-btn');
@@ -157,6 +165,14 @@ function triggerPad(deckStr, padIndex, velocity) {
     } else {
       padBtns[padIndex].dispatchEvent(new Event('mouseup', { bubbles: true }));
     }
+  }
+}
+
+/** Trigger a camera viewpoint preset on the rig (deck A/B, preset 0-7). */
+function triggerCam(deckStr, presetIndex, velocity) {
+  if (velocity <= 0) return;
+  if (typeof window !== 'undefined' && typeof window._setDeckCamPreset === 'function') {
+    window._setDeckCamPreset(deckStr === 'a', presetIndex);
   }
 }
 
@@ -494,15 +510,28 @@ export const APP_ACTIONS = {
   // ── HDRI environment scrub ──
   'hdri': { kind: 'selectScrub', el: 'hdri-select' },
 
-  // ── Performance pads (8 per deck) ──
+  // ── Performance pads (8 per deck) — physical hot-cue pads stay LOOPS ──
   ...buildPadActions('a'),
   ...buildPadActions('b'),
+
+  // ── Camera viewpoint presets (8 per deck) ──
+  // Maps the physical "Beat Loop" pad mode (or any control) to the camera rig.
+  ...buildCamActions('a'),
+  ...buildCamActions('b'),
 };
 
 function buildPadActions(deck) {
   const out = {};
   for (let i = 0; i < 8; i++) {
     out[`pad-${deck}-${i + 1}`] = { kind: 'pad', deck, index: i };
+  }
+  return out;
+}
+
+function buildCamActions(deck) {
+  const out = {};
+  for (let i = 0; i < 8; i++) {
+    out[`cam-${deck}-${i + 1}`] = { kind: 'cam', deck, index: i };
   }
   return out;
 }
@@ -530,6 +559,10 @@ function runAction(actionId, value, isNote) {
     case 'pad':
       // Pads need both down (velocity > 0) and up (velocity 0) — pass through.
       triggerPad(action.deck, action.index, value);
+      break;
+    case 'cam':
+      // Camera viewpoint preset (fires on press only).
+      triggerCam(action.deck, action.index, value);
       break;
     case 'selectCycle':
       if (value > 0) cycleSelect(action.el);
