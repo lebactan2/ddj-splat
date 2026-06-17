@@ -120,6 +120,22 @@ let currentScalesB = new Float32Array(32).fill(0);
 let currentScalesC = new Float32Array(32).fill(0);
 let currentScalesD = new Float32Array(32).fill(0);
 
+// MULTI-VIEW helper: each deck owns a contiguous block of splat "scenes" inside
+// the single splatMesh, laid out in load order A,B,C,D (see rebuildViewerBuffers).
+// Returns { a:[start,count], b:[...], c:[...], d:[...] } scene-index ranges.
+function deckSceneRanges() {
+  const totA = numChunksA + numRollChunksA;
+  const totB = numChunksB + numRollChunksB;
+  const totC = numChunksC + numRollChunksC;
+  const totD = numChunksD + numRollChunksD;
+  let i = 0;
+  const a = [i, totA]; i += totA;
+  const b = [i, totB]; i += totB;
+  const c = [i, totC]; i += totC;
+  const d = [i, totD]; i += totD;
+  return { a, b, c, d };
+}
+
 let isCameraFramed = false;
 let baseFramedDistance = 5;
 let isZoomSyncing = false;
@@ -199,13 +215,22 @@ const CAM_PRESETS = [
   { az: -Math.PI / 4,       el: Math.PI / 6,  label: '¾L'    },
   { az: Math.PI / 4,        el: Math.PI / 6,  label: '¾R'    },
 ];
-// Per-deck view targets (start at FRONT). jogAzA/B is the continuous turntable
+// Per-deck view targets (start at FRONT). jogAz* is the continuous turntable
 // orbit contribution added by the jog wheels (separate so RESET VIEW can zero it).
+// MULTI-VIEW: each deck now drives its OWN camera (no A/B crossfade blend).
 let camA = { azimuth: 0, elevation: 0 };
 let camB = { azimuth: 0, elevation: 0 };
-let jogAzA = 0, jogAzB = 0;
-// Eased applied angles actually written to the camera each frame.
-let camCurrent = { azimuth: 0, elevation: 0 };
+let camC = { azimuth: 0, elevation: 0 };
+let camD = { azimuth: 0, elevation: 0 };
+let jogAzA = 0, jogAzB = 0, jogAzC = 0, jogAzD = 0;
+// Eased applied angles actually written to each deck's camera every frame.
+let camCurrent = { azimuth: 0, elevation: 0 };   // legacy single-view current (kept harmless)
+const camCurrentA = { azimuth: 0, elevation: 0 };
+const camCurrentB = { azimuth: 0, elevation: 0 };
+const camCurrentC = { azimuth: 0, elevation: 0 };
+const camCurrentD = { azimuth: 0, elevation: 0 };
+// One THREE.PerspectiveCamera per deck, created lazily in updateCameraRig.
+const deckCameras = { a: null, b: null, c: null, d: null };
 let camRigInitialized = false;
 const CAM_EASE = 0.12;          // exponential smoothing factor (ease-in/out)
 const CAM_SETTLE_EPS = 0.0006;  // below this the rig is considered settled
@@ -222,12 +247,23 @@ function lerpAngle(a, b, t) {
 // Reusable origin for camera.lookAt.
 const _camOrigin = new THREE.Vector3(0, 0, 0);
 
+// Resolve a deck argument (legacy boolean isDeckA, or 'a'/'b'/'c'/'d') to its
+// per-deck view-target object.
+function _deckCamObj(deck) {
+  if (deck === true || deck === 'a') return camA;
+  if (deck === false || deck === 'b') return camB;
+  if (deck === 'c') return camC;
+  if (deck === 'd') return camD;
+  return camA;
+}
+
 // Set a deck's target view to a preset (used by on-screen pads + MIDI cam actions).
-function setDeckCamPreset(isDeckA, index) {
+// `deck` may be the legacy boolean isDeckA or a deck char 'a'/'b'/'c'/'d'.
+function setDeckCamPreset(deck, index) {
   const p = CAM_PRESETS[index];
   if (!p) return;
-  if (isDeckA) { camA.azimuth = p.az; camA.elevation = p.el; }
-  else         { camB.azimuth = p.az; camB.elevation = p.el; }
+  const cam = _deckCamObj(deck);
+  cam.azimuth = p.az; cam.elevation = p.el;
   splashFactor = 1.8;
   camRigSettling = true;
   startAnimationLoop();
@@ -236,66 +272,111 @@ function setDeckCamPreset(isDeckA, index) {
 // Expose for MIDI cam actions.
 window._setDeckCamPreset = setDeckCamPreset;
 
-// Per-frame: blend the two deck targets by the crossfader, then ease the
-// applied current angles toward that blended target and position the camera.
+// Deck → state lookup table (built once; references are stable).
+const DECK_RIG = {
+  a: { tgt: camA, cur: camCurrentA, scene: () => sceneA, jog: () => jogAzA },
+  b: { tgt: camB, cur: camCurrentB, scene: () => sceneB, jog: () => jogAzB },
+  c: { tgt: camC, cur: camCurrentC, scene: () => sceneC, jog: () => jogAzC },
+  d: { tgt: camD, cur: camCurrentD, scene: () => sceneD, jog: () => jogAzD },
+};
+const DECK_KEYS = ['a', 'b', 'c', 'd'];
+
+// Current master-vol zoom factor (shared radius multiplier for all decks).
+function _currentZoomFactor() {
+  if (!masterVol) return 1.0;
+  const t = Number(masterVol.value) / 100;
+  return Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
+}
+
+// List of currently loaded decks, in fixed A,B,C,D order.
+function loadedDeckKeys() {
+  const out = [];
+  if (sceneA) out.push('a');
+  if (sceneB) out.push('b');
+  if (sceneC) out.push('c');
+  if (sceneD) out.push('d');
+  return out;
+}
+
+// Per-frame: each deck independently eases its own current angles toward its
+// target (preset + jog orbit) and positions its own camera around the origin.
+// MULTI-VIEW: no more crossfader blend — `mixAmount` is ignored for the camera.
+// `viewer.camera` is synced to the FIRST loaded deck so the library's splat sort
+// (which always sorts against viewer.camera) matches at least the primary panel.
 function updateCameraRig(mixAmount) {
   if (!viewer || !viewer.controls || !viewer.camera) return;
 
   // Keep OrbitControls mouse-rotate from fighting the rig (zoom still works).
   if (viewer.controls.enableRotate !== false) viewer.controls.enableRotate = false;
 
-  // Effective per-deck targets include the jog turntable orbit contribution.
-  const aAz = camA.azimuth + jogAzA;
-  const bAz = camB.azimuth + jogAzB;
+  const radius = baseFramedDistance * _currentZoomFactor();
+  const refCam = viewer.camera;
 
-  // Single-deck guard: only blend toward a deck that is actually loaded.
-  let tgtAz, tgtEl;
-  if (sceneA && sceneB) {
-    tgtAz = lerpAngle(aAz, bAz, mixAmount);
-    tgtEl = camA.elevation + (camB.elevation - camA.elevation) * mixAmount;
-  } else if (sceneB && !sceneA) {
-    tgtAz = bAz; tgtEl = camB.elevation;
-  } else {
-    tgtAz = aAz; tgtEl = camA.elevation;
+  let anySettling = false;
+
+  for (const k of DECK_KEYS) {
+    const rig = DECK_RIG[k];
+    // Lazily create this deck's camera, cloning viewer.camera's intrinsics.
+    let cam = deckCameras[k];
+    if (!cam) {
+      cam = refCam.clone();
+      deckCameras[k] = cam;
+    }
+    // Keep intrinsics in sync with the live viewer camera (fov/aspect/near/far).
+    cam.fov = refCam.fov; cam.near = refCam.near; cam.far = refCam.far;
+
+    const tgtAz = rig.tgt.azimuth + rig.jog();
+    const tgtEl = rig.tgt.elevation;
+
+    if (!camRigInitialized) {
+      rig.cur.azimuth = tgtAz;
+      rig.cur.elevation = tgtEl;
+    } else {
+      rig.cur.azimuth = lerpAngle(rig.cur.azimuth, tgtAz, CAM_EASE);
+      rig.cur.elevation += (tgtEl - rig.cur.elevation) * CAM_EASE;
+    }
+
+    // Settled check (only meaningful for loaded decks).
+    if (rig.scene()) {
+      let dAz = tgtAz - rig.cur.azimuth;
+      while (dAz > Math.PI) dAz -= Math.PI * 2;
+      while (dAz < -Math.PI) dAz += Math.PI * 2;
+      const dEl = tgtEl - rig.cur.elevation;
+      if (Math.abs(dAz) > CAM_SETTLE_EPS || Math.abs(dEl) > CAM_SETTLE_EPS) anySettling = true;
+    }
+
+    const ce = Math.cos(rig.cur.elevation);
+    cam.position.set(
+      radius * ce * Math.sin(rig.cur.azimuth),
+      radius * Math.sin(rig.cur.elevation),
+      radius * ce * Math.cos(rig.cur.azimuth)
+    );
+    cam.up.copy(refCam.up);
+    cam.lookAt(_camOrigin);
+    cam.updateMatrixWorld(true);
   }
 
-  if (!camRigInitialized) {
-    camCurrent.azimuth = tgtAz;
-    camCurrent.elevation = tgtEl;
-    camRigInitialized = true;
-  } else {
-    camCurrent.azimuth = lerpAngle(camCurrent.azimuth, tgtAz, CAM_EASE);
-    camCurrent.elevation += (tgtEl - camCurrent.elevation) * CAM_EASE;
-  }
+  camRigInitialized = true;
+  camRigSettling = anySettling;
 
-  // Settled? (used as an animation-loop keep-alive while easing.)
-  let dAz = tgtAz - camCurrent.azimuth;
-  while (dAz > Math.PI) dAz -= Math.PI * 2;
-  while (dAz < -Math.PI) dAz += Math.PI * 2;
-  const dEl = tgtEl - camCurrent.elevation;
-  camRigSettling = (Math.abs(dAz) > CAM_SETTLE_EPS || Math.abs(dEl) > CAM_SETTLE_EPS);
-
-  // Radius = current framed distance honouring master-vol zoom.
-  let zoomFactor = 1.0;
-  if (masterVol) {
-    const t = Number(masterVol.value) / 100;
-    zoomFactor = Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
-  }
-  const radius = baseFramedDistance * zoomFactor;
-
-  // Spherical → cartesian around origin (azimuth about world-Y, elevation up/down).
-  const ce = Math.cos(camCurrent.elevation);
-  const x = radius * ce * Math.sin(camCurrent.azimuth);
-  const y = radius * Math.sin(camCurrent.elevation);
-  const z = radius * ce * Math.cos(camCurrent.azimuth);
-
-  viewer.camera.position.set(x, y, z);
+  // Sync viewer.camera (and OrbitControls) to the primary (first loaded) deck so
+  // the worker splat sort targets that panel. Other panels reuse that sort order
+  // (approximate alpha ordering — see notes in renderPass.render).
+  const primary = loadedDeckKeys()[0] || 'a';
+  const pcam = deckCameras[primary];
+  viewer.camera.position.copy(pcam.position);
   if (viewer.controls.target) viewer.controls.target.set(0, 0, 0);
+  viewer.camera.up.copy(pcam.up);
   viewer.camera.lookAt(_camOrigin);
   viewer.controls.update();
+  // Mirror into legacy camCurrent for any external readers.
+  camCurrent.azimuth = DECK_RIG[primary].cur.azimuth;
+  camCurrent.elevation = DECK_RIG[primary].cur.elevation;
 }
-window._camRig = { camA, camB, get current() { return camCurrent; },
+window._camRig = { camA, camB, camC, camD, deckCameras,
+  get current() { return camCurrent; },
   get jogA() { return jogAzA; }, get jogB() { return jogAzB; },
+  get jogC() { return jogAzC; }, get jogD() { return jogAzD; },
   setPreset: setDeckCamPreset };
 
 // ── Tempo range cycling (Feature #5) ─────────────────────────────────────────
@@ -2514,23 +2595,28 @@ window._setDeckLoop = (deckStr, index, down) => {
 };
 
 // On-screen pads now set the deck's camera VIEWPOINT preset (the rig eases to it).
-function setupPads(padsContainerId, isDeckA) {
+// `deckKey` is 'a'/'b'/'c'/'d'; each deck's pads drive only its own camera.
+function setupPads(padsContainerId, deckKey) {
   const padButtons = Array.from(document.querySelectorAll(`#${padsContainerId} .pad-btn`));
+  const isLoaded = () => deckKey === 'a' ? sceneA : deckKey === 'b' ? sceneB
+                       : deckKey === 'c' ? sceneC : sceneD;
   padButtons.forEach((pad, index) => {
     pad.addEventListener('mousedown', () => {
-      if (!sceneA) return;
+      if (!isLoaded()) return;
       pad.classList.add('active');
       // Highlight only the active viewpoint within this deck's grid.
       padButtons.forEach(p => { if (p !== pad) p.classList.remove('active'); });
-      setDeckCamPreset(isDeckA, index);
+      setDeckCamPreset(deckKey, index);
     });
     const release = () => pad.classList.remove('active');
     pad.addEventListener('mouseup', release);
     pad.addEventListener('mouseleave', release);
   });
 }
-setupPads('pads-a', true);
-setupPads('pads-b', false);
+setupPads('pads-a', 'a');
+setupPads('pads-b', 'b');
+setupPads('pads-c', 'c');
+setupPads('pads-d', 'd');
 
 // ── Drag-to-spin Jog Wheels ────────────────────────────
 function setupJogWheel(jogEl, onSpin, onRelease) {
@@ -2601,39 +2687,33 @@ function setupJogWheel(jogEl, onSpin, onRelease) {
 // Jog wheels now orbit the CAMERA (turntable spin around the up-axis): each
 // spin adds a continuous azimuth delta to that deck's camera target. The object
 // no longer rotates with the jog (it keeps only its playback spin).
-setupJogWheel(
-  document.querySelector('#jog-a'),
-  (delta) => {
-    isScratchingA = true;
-    jogAzA += delta;
-    camRigSettling = true;
-    startAnimationLoop();
-    triggerRealtimeUpdate();
-  },
-  () => {
-    isScratchingA = false;
-    triggerRealtimeUpdate();
-  }
-);
-
-setupJogWheel(
-  document.querySelector('#jog-b'),
-  (delta) => {
-    isScratchingB = true;
-    jogAzB += delta;
-    camRigSettling = true;
-    startAnimationLoop();
-    triggerRealtimeUpdate();
-  },
-  () => {
-    isScratchingB = false;
-    triggerRealtimeUpdate();
-  }
-);
+// Each jog wheel adds a continuous azimuth orbit to ITS OWN deck camera only.
+function setupDeckJog(jogId, addAzimuth, setScratching) {
+  const el = document.querySelector(jogId);
+  if (!el) return;
+  setupJogWheel(
+    el,
+    (delta) => {
+      setScratching(true);
+      addAzimuth(delta);
+      camRigSettling = true;
+      startAnimationLoop();
+      triggerRealtimeUpdate();
+    },
+    () => {
+      setScratching(false);
+      triggerRealtimeUpdate();
+    }
+  );
+}
+setupDeckJog('#jog-a', (d) => { jogAzA += d; }, (v) => { isScratchingA = v; });
+setupDeckJog('#jog-b', (d) => { jogAzB += d; }, (v) => { isScratchingB = v; });
+setupDeckJog('#jog-c', (d) => { jogAzC += d; }, (v) => { isScratchingC = v; });
+setupDeckJog('#jog-d', (d) => { jogAzD += d; }, (v) => { isScratchingD = v; });
 
 // ── MIDI jog nudge (side-ring XZ translation) ─────────
-document.querySelector('#jog-a').addEventListener('jognudge', (e) => { nudgeXA += e.detail.delta; });
-document.querySelector('#jog-b').addEventListener('jognudge', (e) => { nudgeXB += e.detail.delta; });
+document.querySelector('#jog-a')?.addEventListener('jognudge', (e) => { nudgeXA += e.detail.delta; });
+document.querySelector('#jog-b')?.addEventListener('jognudge', (e) => { nudgeXB += e.detail.delta; });
 
 // ── VJ Animation loop ──────────────────────────────────
 let lastTime = performance.now();
@@ -3215,6 +3295,36 @@ function setupPostProcessingAndLensFlare() {
     strobeScene.add(quad);
   }
 
+  // MULTI-VIEW layout: given N loaded decks and a buffer (W,H) in pixels, return
+  // an array of panel rects {x,y,w,h} in WebGL viewport coords (origin bottom-left).
+  // 1 → fullscreen; 2 → side-by-side; 3 → 2 top + 1 bottom-spanning; 4 → 2x2.
+  function computeLayoutRects(n, W, H) {
+    const r = [];
+    if (n <= 1) {
+      r.push({ x: 0, y: 0, w: W, h: H });
+    } else if (n === 2) {
+      const hw = Math.floor(W / 2);
+      r.push({ x: 0, y: 0, w: hw, h: H });
+      r.push({ x: hw, y: 0, w: W - hw, h: H });
+    } else if (n === 3) {
+      const hw = Math.floor(W / 2);
+      const hh = Math.floor(H / 2);
+      // Two on top row, one spanning the bottom row.
+      r.push({ x: 0,  y: hh, w: hw,     h: H - hh });
+      r.push({ x: hw, y: hh, w: W - hw, h: H - hh });
+      r.push({ x: 0,  y: 0,  w: W,      h: hh });
+    } else {
+      const hw = Math.floor(W / 2);
+      const hh = Math.floor(H / 2);
+      // 2x2: top-left, top-right, bottom-left, bottom-right.
+      r.push({ x: 0,  y: hh, w: hw,     h: H - hh });
+      r.push({ x: hw, y: hh, w: W - hw, h: H - hh });
+      r.push({ x: 0,  y: 0,  w: hw,     h: hh });
+      r.push({ x: hw, y: 0,  w: W - hw, h: hh });
+    }
+    return r;
+  }
+
   const renderPass = {
     enabled: true,
     needsSwap: true,
@@ -3227,33 +3337,102 @@ function setupPostProcessingAndLensFlare() {
       renderer.clear();
       renderer.autoClear = false;
 
-      if (viewer.threeScene) {
-        renderer.render(viewer.threeScene, viewer.camera);
-      }
+      const keys = loadedDeckKeys();
+      const mesh = viewer.splatMesh;
+      const sceneCount = mesh ? mesh.getSceneCount() : 0;
 
-      // Strobe overlay: composites over the HDRI/background (autoClear is already
-      // false here, so the background is preserved) and the splats draw on top.
-      // FPS: skipped entirely when strength is ~0, so strobe-off costs nothing.
-      // When on it is a single cheap full-screen quad (cheaper than the old
-      // full-viewport filter:blur(48px) DOM gradient divs).
-      if (strobeMaterial && strobeStrength > 0.001) {
-        strobeMaterial.uniforms.uStrength.value = strobeStrength;
-        strobeMaterial.uniforms.uMode.value = strobeUMode;
-        strobeMaterial.uniforms.uEdge.value = strobeUEdge;
-        renderer.render(strobeScene, strobeCamera);
-      }
-
-      if (viewer.splatMesh) {
-        renderer.render(viewer.splatMesh, viewer.camera);
-      }
-
-      if (viewer.sceneHelper) {
-        if (viewer.sceneHelper.getFocusMarkerOpacity() > 0.0) {
-          renderer.render(viewer.sceneHelper.focusMarker, viewer.camera);
+      // ── Single-deck (or none) fast path: full-screen, no scissor (no regression).
+      if (keys.length <= 1) {
+        if (viewer.threeScene) renderer.render(viewer.threeScene, viewer.camera);
+        if (strobeMaterial && strobeStrength > 0.001) {
+          strobeMaterial.uniforms.uStrength.value = strobeStrength;
+          strobeMaterial.uniforms.uMode.value = strobeUMode;
+          strobeMaterial.uniforms.uEdge.value = strobeUEdge;
+          renderer.render(strobeScene, strobeCamera);
         }
-        if (viewer.showControlPlane) {
-          renderer.render(viewer.sceneHelper.controlPlane, viewer.camera);
+        if (mesh) renderer.render(mesh, viewer.camera);
+        if (viewer.sceneHelper) {
+          if (viewer.sceneHelper.getFocusMarkerOpacity() > 0.0)
+            renderer.render(viewer.sceneHelper.focusMarker, viewer.camera);
+          if (viewer.showControlPlane)
+            renderer.render(viewer.sceneHelper.controlPlane, viewer.camera);
         }
+        renderer.autoClear = true;
+        renderer.setRenderTarget(null);
+        return;
+      }
+
+      // ── Multi-deck: one viewport panel per loaded deck, each with its own camera.
+      // SORT CAVEAT: the library sorts splats once per frame against viewer.camera
+      // (the primary/first-loaded deck). Non-primary panels reuse that order, so
+      // their front-to-back alpha ordering is approximate. Acceptable for typical
+      // scenes; see report. We cannot synchronously re-sort per panel (worker is
+      // async + single shared index buffer).
+      const size = new THREE.Vector2();
+      renderer.getSize(size);
+      const pr = renderer.getPixelRatio();
+      const W = Math.floor(size.x * pr);
+      const H = Math.floor(size.y * pr);
+      const rects = computeLayoutRects(keys.length, W, H);
+      const ranges = deckSceneRanges();
+
+      // Save current per-scene visibility so we can restore after the loop.
+      const savedVis = [];
+      for (let i = 0; i < sceneCount; i++) {
+        const s = viewer.getSplatScene(i);
+        savedVis.push(s ? s.visible : false);
+      }
+
+      const setDeckVisible = (deckKey) => {
+        const [start, count] = ranges[deckKey];
+        for (let i = 0; i < sceneCount; i++) {
+          const s = viewer.getSplatScene(i);
+          if (!s) continue;
+          const inDeck = (i >= start && i < start + count);
+          // Honour the per-frame intended visibility (savedVis) only inside this
+          // deck's block; everything else is hidden for this sub-render.
+          s.visible = inDeck ? savedVis[i] : false;
+        }
+      };
+
+      renderer.setScissorTest(true);
+      for (let p = 0; p < keys.length; p++) {
+        const k = keys[p];
+        const rect = rects[p];
+        const cam = deckCameras[k] || viewer.camera;
+        // Match this camera's aspect to its panel so the splat isn't stretched.
+        if (cam.isPerspectiveCamera) {
+          const aspect = rect.w / Math.max(1, rect.h);
+          if (Math.abs(cam.aspect - aspect) > 1e-4) {
+            cam.aspect = aspect;
+            cam.updateProjectionMatrix();
+          }
+        }
+
+        renderer.setViewport(rect.x, rect.y, rect.w, rect.h);
+        renderer.setScissor(rect.x, rect.y, rect.w, rect.h);
+
+        if (viewer.threeScene) renderer.render(viewer.threeScene, cam);
+
+        if (strobeMaterial && strobeStrength > 0.001) {
+          strobeMaterial.uniforms.uStrength.value = strobeStrength;
+          strobeMaterial.uniforms.uMode.value = strobeUMode;
+          strobeMaterial.uniforms.uEdge.value = strobeUEdge;
+          renderer.render(strobeScene, strobeCamera);
+        }
+
+        if (mesh) {
+          setDeckVisible(k);
+          renderer.render(mesh, cam);
+        }
+      }
+
+      // Restore full-frame state + original visibility.
+      renderer.setScissorTest(false);
+      renderer.setViewport(0, 0, W, H);
+      for (let i = 0; i < sceneCount; i++) {
+        const s = viewer.getSplatScene(i);
+        if (s) s.visible = savedVis[i];
       }
 
       renderer.autoClear = true;
@@ -4049,10 +4228,12 @@ async function performRealtimeUpdate() {
     const now = Date.now();
     const cuts = parseInt(cutsSlider.value);
     const mixAmount = Number(crossfader.value) / 100;
-    // Equal-power crossfade gains: full A at mixAmount 0, full B at 1.
-    // Applied as a smooth per-deck opacity so the opposite deck fully fades out.
-    const crossGainA = Math.cos(mixAmount * Math.PI / 2);
-    const crossGainB = Math.sin(mixAmount * Math.PI / 2);
+    // MULTI-VIEW: decks A/B are now rendered in independent viewport panels, so
+    // the crossfader no longer cross-hides them. Force both gains to 1 so each
+    // deck is fully visible in its own panel. (Crossfader left harmless/unused
+    // for visibility; the multi-view render decides which deck draws per panel.)
+    const crossGainA = 1.0;
+    const crossGainB = 1.0;
 
     // Camera rig: blend deck view targets by the crossfader, ease, and position
     // the camera looking at the origin (radius honours master-vol zoom).
@@ -4512,27 +4693,31 @@ async function performRealtimeUpdate() {
 }
 
 // ── Reset Orientation (RESET VIEW) ─────────────────────
-// Returns both decks' camera to the default FRONT preset, zeroes the jog orbit
-// contribution and the object rotation, and reframes at the default distance.
+// Returns ALL decks' cameras to the default FRONT preset, zeroes each deck's jog
+// orbit contribution and the object rotation, and reframes at the default distance.
 const btnResetOrient = document.getElementById('btn-reset-orient');
 if (btnResetOrient) {
   btnResetOrient.addEventListener('click', () => {
     const front = CAM_PRESETS[0];
-    camA.azimuth = front.az; camA.elevation = front.el;
-    camB.azimuth = front.az; camB.elevation = front.el;
-    jogAzA = 0; jogAzB = 0;
-    // Snap the eased current angles straight to front (no slow orbit-around).
+    for (const cam of [camA, camB, camC, camD]) {
+      cam.azimuth = front.az; cam.elevation = front.el;
+    }
+    jogAzA = 0; jogAzB = 0; jogAzC = 0; jogAzD = 0;
+    // Snap every deck's eased current angles straight to front (no slow orbit).
+    for (const cur of [camCurrentA, camCurrentB, camCurrentC, camCurrentD]) {
+      cur.azimuth = front.az; cur.elevation = front.el;
+    }
     camCurrent.azimuth = front.az;
     camCurrent.elevation = front.el;
     camRigInitialized = true;
     camRigSettling = false;
     // Zero the object playback/jog rotation so geometry returns to upright.
-    playAngleA = 0; playAngleB = 0;
-    jogAngleA = 0; jogAngleB = 0;
+    playAngleA = 0; playAngleB = 0; playAngleC = 0; playAngleD = 0;
+    jogAngleA = 0; jogAngleB = 0; jogAngleC = 0; jogAngleD = 0;
     // Reframe at the default distance (re-derives baseFramedDistance + applies zoom).
     if (typeof centerCamera === 'function') centerCamera();
     // Clear active pad highlights.
-    document.querySelectorAll('#pads-a .pad-btn.active, #pads-b .pad-btn.active')
+    document.querySelectorAll('#pads-a .pad-btn.active, #pads-b .pad-btn.active, #pads-c .pad-btn.active, #pads-d .pad-btn.active')
       .forEach(el => el.classList.remove('active'));
     // Reposition immediately from the rig and redraw.
     updateCameraRig(Number(crossfader.value) / 100);
@@ -4593,10 +4778,11 @@ btnReset.addEventListener('click', async () => {
   isPlayingC = false; isPlayingD = false;
   playAngleA = 0; playAngleB = 0; playAngleC = 0; playAngleD = 0;
   jogAngleA = 0; jogAngleB = 0; jogAngleC = 0; jogAngleD = 0;
-  // Reset the camera rig to FRONT.
-  camA.azimuth = CAM_PRESETS[0].az; camA.elevation = CAM_PRESETS[0].el;
-  camB.azimuth = CAM_PRESETS[0].az; camB.elevation = CAM_PRESETS[0].el;
-  jogAzA = 0; jogAzB = 0;
+  // Reset the camera rig to FRONT (all decks).
+  for (const cam of [camA, camB, camC, camD]) {
+    cam.azimuth = CAM_PRESETS[0].az; cam.elevation = CAM_PRESETS[0].el;
+  }
+  jogAzA = 0; jogAzB = 0; jogAzC = 0; jogAzD = 0;
   camCurrent.azimuth = CAM_PRESETS[0].az; camCurrent.elevation = CAM_PRESETS[0].el;
   camRigInitialized = false; camRigSettling = false;
   if (currentScalesA) currentScalesA.fill(0);
