@@ -127,6 +127,9 @@ let zoomSyncAttached = false;
 let updateInProgress = false;
 let updatePending = false;
 
+// Sequential scale-up reveal period (seconds). One full wave of 16 chunks revealing then resetting.
+const REVEAL_PERIOD = 2.5;
+
 // Play Animation state
 let isPlayingA = false;
 let isPlayingB = false;
@@ -358,8 +361,8 @@ appDiv.innerHTML = `
             <input type="range" id="max-splats-slider-a" class="max-splats" min="250000" max="1000000" step="10000" value="250000" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
-            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">4</span></span>
-            <input type="range" id="chunks-slider-a" class="max-chunks" min="1" max="16" step="1" value="4" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">16</span></span>
+            <input type="range" id="chunks-slider-a" class="max-chunks" min="1" max="16" step="1" value="16" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -434,8 +437,8 @@ appDiv.innerHTML = `
             <input type="range" id="max-splats-slider-b" class="max-splats" min="250000" max="1000000" step="10000" value="250000" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
-            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">4</span></span>
-            <input type="range" id="chunks-slider-b" class="max-chunks" min="1" max="16" step="1" value="4" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">16</span></span>
+            <input type="range" id="chunks-slider-b" class="max-chunks" min="1" max="16" step="1" value="16" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -3317,7 +3320,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneA) {
       const fxSceneA = processFx(sceneA, 'deckA');
-      const chunksA = sliceIntoSpheres(fxSceneA, Number(document.querySelector('#chunks-slider-a').value) || 4);
+      const chunksA = sliceIntoSpheres(fxSceneA, Number(document.querySelector('#chunks-slider-a').value) || 16);
       for (const c of chunksA) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3337,7 +3340,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneB) {
       const fxSceneB = processFx(sceneB, 'deckB');
-      const chunksB = sliceIntoSpheres(fxSceneB, Number(document.querySelector('#chunks-slider-b').value) || 4);
+      const chunksB = sliceIntoSpheres(fxSceneB, Number(document.querySelector('#chunks-slider-b').value) || 16);
       for (const c of chunksB) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3357,7 +3360,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneC) {
       const fxSceneC = processFx(sceneC, 'deckC');
-      const chunksC = sliceIntoSpheres(fxSceneC, Number(document.querySelector('#chunks-slider-c')?.value) || 4);
+      const chunksC = sliceIntoSpheres(fxSceneC, Number(document.querySelector('#chunks-slider-c')?.value) || 16);
       for (const c of chunksC) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3370,7 +3373,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneD) {
       const fxSceneD = processFx(sceneD, 'deckD');
-      const chunksD = sliceIntoSpheres(fxSceneD, Number(document.querySelector('#chunks-slider-d')?.value) || 4);
+      const chunksD = sliceIntoSpheres(fxSceneD, Number(document.querySelector('#chunks-slider-d')?.value) || 16);
       for (const c of chunksD) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -4310,11 +4313,23 @@ async function performRealtimeUpdate() {
       
       if (isPlaying) {
         targetVisible = crossGainA > 0.01;
+        beatScaleMult = 1.0;
+        // --- NEW PLAY ANIMATION: looping 16-chunk sequential scale-up reveal + spin ---
+        // cyclePos goes 0→1 over REVEAL_PERIOD seconds, then wraps (chunks reset and re-reveal).
+        const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
+        // Chunk i reveals when cyclePos passes its threshold (i / numChunksA).
+        // Roll chunks (i >= numChunksA) are always fully revealed during play.
+        const revealThreshold = (i < numChunksA) ? (i / Math.max(1, numChunksA)) : 0;
+        targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
+        // No per-chunk random Euler rotation — spin is the whole-object playAngle below.
+        rX = 0; rY = 0; rZ = 0;
+        /* --- PREVIOUS PLAY ANIMATION (random shuffle) — kept for reference ---
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
         rX = (pseudoRandom(timeStepA, i + 300) - 0.5) * Math.PI * 2;
         rY = (pseudoRandom(timeStepA, i + 400) - 0.5) * Math.PI * 2;
         rZ = (pseudoRandom(timeStepA, i + 500) - 0.5) * Math.PI * 2;
+        --- END PREVIOUS PLAY ANIMATION --- */
       } else {
         targetVisible = crossGainA > 0.01;
         targetScaleFactor = 1.0;
@@ -4364,11 +4379,19 @@ async function performRealtimeUpdate() {
       
       if (isPlaying) {
         targetVisible = crossGainB > 0.01;
+        beatScaleMult = 1.0;
+        // --- NEW PLAY ANIMATION: looping 16-chunk sequential scale-up reveal + spin ---
+        const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
+        const revealThreshold = (i < numChunksB) ? (i / Math.max(1, numChunksB)) : 0;
+        targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
+        rX = 0; rY = 0; rZ = 0;
+        /* --- PREVIOUS PLAY ANIMATION (random shuffle) — kept for reference ---
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
         rX = (pseudoRandom(timeStepB, i + 300) - 0.5) * Math.PI * 2;
         rY = (pseudoRandom(timeStepB, i + 400) - 0.5) * Math.PI * 2;
         rZ = (pseudoRandom(timeStepB, i + 500) - 0.5) * Math.PI * 2;
+        --- END PREVIOUS PLAY ANIMATION --- */
       } else {
         targetVisible = crossGainB > 0.01;
         targetScaleFactor = 1.0;
@@ -4415,8 +4438,15 @@ async function performRealtimeUpdate() {
       
       if (isPlayingC) {
         targetVisible = true;
+        // --- NEW PLAY ANIMATION: looping sequential scale-up reveal + spin ---
+        const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
+        const revealThreshold = (i < numChunksC) ? (i / Math.max(1, numChunksC)) : 0;
+        targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
+        playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
+        /* --- PREVIOUS PLAY ANIMATION (always full scale) — kept for reference ---
         targetScaleFactor = 1.0;
         playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
+        --- END PREVIOUS PLAY ANIMATION --- */
       }
 
       currentScalesC[i] += (targetScaleFactor - currentScalesC[i]) * 0.15;
@@ -4446,8 +4476,15 @@ async function performRealtimeUpdate() {
       
       if (isPlayingD) {
         targetVisible = true;
+        // --- NEW PLAY ANIMATION: looping sequential scale-up reveal + spin ---
+        const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
+        const revealThreshold = (i < numChunksD) ? (i / Math.max(1, numChunksD)) : 0;
+        targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
+        playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
+        /* --- PREVIOUS PLAY ANIMATION (always full scale) — kept for reference ---
         targetScaleFactor = 1.0;
         playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
+        --- END PREVIOUS PLAY ANIMATION --- */
       }
 
       currentScalesD[i] += (targetScaleFactor - currentScalesD[i]) * 0.15;
