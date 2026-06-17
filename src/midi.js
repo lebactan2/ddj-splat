@@ -207,8 +207,8 @@ const PROFILES = {
         // Cue — Note 12 (0x0C) → performs Stop in the app
         if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);
 
-        // Shift button — Note 63 (0x3F): track for extended tempo range
-        if (note === 63) { window['_ddjShift' + deckStr.toUpperCase()] = (velocity > 0); if (window._updateBPM) window._updateBPM(); }
+        // Shift button — Note 63 (0x3F): cycle tempo range on press
+        if (note === 63 && velocity > 0) { if (window._cycleTempoRange) window._cycleTempoRange(deckStr); }
 
         // Hot Cue pads — Notes 0-7 (0x00-0x07)
         if (note >= 0 && note <= 7) {
@@ -321,8 +321,8 @@ const PROFILES = {
         if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause
         if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue → Stop
 
-        // Shift button — Note 63 (0x3F): track for extended tempo range
-        if (note === 63) { window['_ddjShift' + deckStr.toUpperCase()] = (velocity > 0); if (window._updateBPM) window._updateBPM(); }
+        // Shift button — Note 63 (0x3F): cycle tempo range on press
+        if (note === 63 && velocity > 0) { if (window._cycleTempoRange) window._cycleTempoRange(deckStr); }
 
         // Loops (CONFIRMED via guided capture): 4-beat=77, half=81, double=83
         if (note === 77) clickButton(`loop-active-${deckStr}`, velocity);
@@ -391,17 +391,7 @@ const PROFILES = {
         if (cc === 8)  mapSlider('master-vol', value);         // Master volume → zoom
         if (cc === 12) mapSlider('knob-dof', value);           // Headphone MIX → DOF
         if (cc === 13) mapSlider('knob-lensflare', value);     // Headphone LEVEL → Flare
-        if (cc === 5) {                                        // Mic level → HDRI scrub (presets only)
-          const hdriEl = document.getElementById('hdri-select');
-          if (hdriEl) {
-            const presetCount = Math.min(5, hdriEl.options.length); // none,sunset,studio,night,forest
-            const idx = Math.min(presetCount - 1, Math.floor(value / 127 * presetCount));
-            if (hdriEl.selectedIndex !== idx) {
-              hdriEl.selectedIndex = idx;
-              hdriEl.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          }
-        }
+        if (cc === 5) runAction('strobe-3state', value, false); // Mic level → strobe 3-state
       }
 
       // ── Beat FX depth (ch4 CC2) → current target deck's FX depth ──
@@ -503,6 +493,9 @@ export const APP_ACTIONS = {
   // ── Misc buttons ──
   'strobe': { kind: 'button', el: 'btn-strobe' },
 
+  // ── Strobe 3-state (off / side / full) — driven by knob/CC value 0-127 ──
+  'strobe-3state': { kind: 'strobe3' },
+
   // ── Jog wheels ──
   'jog-a': { kind: 'jog', el: 'jog-a', scale: 0.03 },
   'jog-b': { kind: 'jog', el: 'jog-b', scale: 0.03 },
@@ -570,6 +563,12 @@ function runAction(actionId, value, isNote) {
     case 'selectScrub':
       mapSelectByValue(action.el, value);
       break;
+    case 'strobe3': {
+      // Quantize 0-127 into thirds: <43 = off, 43-85 = side, >85 = full.
+      const strobeTarget = value < 43 ? 'off' : value <= 85 ? 'side' : 'full';
+      if (window._setStrobeState) window._setStrobeState(strobeTarget);
+      break;
+    }
     default:
       console.warn(`[MIDI] Unknown action kind "${action.kind}" for "${actionId}"`);
   }

@@ -295,9 +295,12 @@ window._camRig = { camA, camB, get current() { return camCurrent; },
   get jogA() { return jogAzA; }, get jogB() { return jogAzB; },
   setPreset: setDeckCamPreset };
 
-// DDJ Shift button state (held = extended tempo range)
-window._ddjShiftA = false;
-window._ddjShiftB = false;
+// ── Tempo range cycling (Feature #5) ─────────────────────────────────────────
+// Four ranges that the Shift button cycles through per deck (percent ±).
+const TEMPO_RANGES = [6, 10, 16, 100];
+// Default to index 1 (±10%).
+let tempoRangeIdxA = 1;
+let tempoRangeIdxB = 1;
 
 // Hot Cue presets (seeds)
 const hotCuesA = [42, 108, 256, 512, 1024, 2048, 4096, 8192];
@@ -373,9 +376,10 @@ appDiv.innerHTML = `
       </div>
       <div class="flex-between" style="margin-top:4px;">
         <button class="round-btn sync" id="sync-a">SYNC</button>
-        <div class="flex-row">
+        <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-a" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
+          <span id="tempo-range-label-a" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';">±10%</span>
         </div>
       </div>
     </div>
@@ -448,9 +452,10 @@ appDiv.innerHTML = `
       </div>
       <div class="flex-between" style="margin-top:4px;">
         <button class="round-btn sync" id="sync-b">SYNC</button>
-       <div class="flex-row">
+       <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-b" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
+          <span id="tempo-range-label-b" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';">±10%</span>
         </div>
       </div>
     </div>
@@ -2107,6 +2112,30 @@ document.getElementById('strobe-mode')?.addEventListener('change', (e) => {
   strobeMode = e.target.value;
 });
 
+/**
+ * Programmatically set strobe state. Called by MIDI mic-knob handler.
+ * mode: 'off' | 'side' | 'full'
+ */
+window._setStrobeState = function(mode) {
+  const newEngaged = (mode !== 'off');
+  const newMode = (mode === 'off') ? strobeMode : mode; // keep last mode when turning off
+  // Skip if nothing changes.
+  if (newEngaged === strobeEngaged && (mode === 'off' || newMode === strobeMode)) return;
+  strobeEngaged = newEngaged;
+  if (mode !== 'off') strobeMode = mode;
+  // Sync UI.
+  const btn = document.getElementById('btn-strobe');
+  if (btn) btn.classList.toggle('active', strobeEngaged);
+  const sel = document.getElementById('strobe-mode');
+  if (sel && mode !== 'off') sel.value = mode;
+  // Start/stop the animation loop exactly as the manual toggle does.
+  if (strobeEngaged) {
+    startAnimationLoop();
+  } else {
+    stopAnimationLoop();
+  }
+};
+
 // Sync crossfader to hidden mixSlider for test suite compatibility
 crossfader.addEventListener('input', () => {
   mixSlider.value = crossfader.value;
@@ -2242,15 +2271,34 @@ let bpmA = 120.0;
 let bpmB = 120.0;
 
 function updateBPM() {
-  // Normal range ±50% (divisor 200); hold Shift for ±150% extended range (divisor ~67)
-  const rangeA = window._ddjShiftA ? 67 : 200;
-  const rangeB = window._ddjShiftB ? 67 : 200;
-  bpmA = 120.0 * (1 - Number(tempoA.value) / rangeA);
-  bpmB = 120.0 * (1 - Number(tempoB.value) / rangeB);
+  // Tempo slider range: min=-100, max=100, center=0.
+  // Map full deflection (±100) to ±rangePercent% of 120 BPM.
+  const rangePercentA = TEMPO_RANGES[tempoRangeIdxA]; // e.g. 10 means ±10%
+  const rangePercentB = TEMPO_RANGES[tempoRangeIdxB];
+  // slider value is in [-100, 100]; normalise to [-1, 1] then scale by range%.
+  bpmA = 120.0 * (1 - (Number(tempoA.value) / 100) * (rangePercentA / 100));
+  bpmB = 120.0 * (1 - (Number(tempoB.value) / 100) * (rangePercentB / 100));
+  const labelA = document.getElementById('tempo-range-label-a');
+  if (labelA) labelA.textContent = `±${rangePercentA === 100 ? 'WIDE' : rangePercentA + '%'}`;
+  const labelB = document.getElementById('tempo-range-label-b');
+  if (labelB) labelB.textContent = `±${rangePercentB === 100 ? 'WIDE' : rangePercentB + '%'}`;
   bpmDispA.textContent = bpmA.toFixed(1);
   bpmDispB.textContent = bpmB.toFixed(1);
 }
 window._updateBPM = updateBPM;
+
+/**
+ * Cycle the tempo range for a deck (called by Shift button press).
+ * deck: 'a' | 'b'
+ */
+window._cycleTempoRange = function(deck) {
+  if (deck === 'a') {
+    tempoRangeIdxA = (tempoRangeIdxA + 1) % TEMPO_RANGES.length;
+  } else {
+    tempoRangeIdxB = (tempoRangeIdxB + 1) % TEMPO_RANGES.length;
+  }
+  updateBPM();
+};
 
 tempoA.addEventListener('input', () => {
   updateKnobFill(tempoA);
