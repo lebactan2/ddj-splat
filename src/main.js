@@ -1244,9 +1244,12 @@ window.addEventListener('resize', resizeViewer);
 
 window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'h') {
-    // Reset Master Vol to default FIRST so centerCamera frames at the default zoom
+    // Reset Master Vol to default, then do a FULL view reset — re-centers/fits
+    // every per-deck camera (not just viewer.camera), same as RESET VIEW.
     if (masterVol) { masterVol.value = 50; updateKnobFill(masterVol); }
-    if (typeof centerCamera === 'function') centerCamera();
+    const rv = document.getElementById('btn-reset-orient');
+    if (rv) rv.click();
+    else if (typeof centerCamera === 'function') centerCamera();
   }
 });
 
@@ -3535,8 +3538,10 @@ function setupPostProcessingAndLensFlare() {
         }
       };
 
-      // Full buffer for all draws (no scissor panels).
-      renderer.setViewport(0, 0, W, H);
+      // Full buffer for all draws (no scissor panels). The render target's own
+      // full viewport (set by setRenderTarget above) is correct — do NOT call
+      // setViewport with physical px here; Three re-applies pixelRatio and would
+      // shrink the image (was the "not full screen with 2+ decks" bug).
 
       // 1) Background once, with the primary deck's camera.
       const primaryCam = deckCameras[keys[0]] || viewer.camera;
@@ -3582,8 +3587,7 @@ function setupPostProcessingAndLensFlare() {
         }
       }
 
-      // Restore full-frame state + original visibility.
-      renderer.setViewport(0, 0, W, H);
+      // Restore original visibility.
       for (let i = 0; i < sceneCount; i++) {
         const s = viewer.getSplatScene(i);
         if (s) s.visible = savedVis[i];
@@ -4743,11 +4747,20 @@ async function performRealtimeUpdate() {
           } else {
             activeChunkA = Math.floor(beatsA) % Math.max(1, numChunksA);
           }
-          targetScaleFactor = (i === activeChunkA) ? 1.2 : 1.0;
+          if (i === activeChunkA) {
+            targetScaleFactor = 2.0; // pulse to 200%
+            const seedA = Math.floor(beatsA); // new random orientation each beat
+            rX = (pseudoRandom(seedA, i + 300) - 0.5) * Math.PI * 2;
+            rY = (pseudoRandom(seedA, i + 400) - 0.5) * Math.PI * 2;
+            rZ = (pseudoRandom(seedA, i + 500) - 0.5) * Math.PI * 2;
+          } else {
+            targetScaleFactor = 1.0;
+            rX = 0; rY = 0; rZ = 0;
+          }
         } else {
           targetScaleFactor = 1.0;
+          rX = 0; rY = 0; rZ = 0;
         }
-        rX = 0; rY = 0; rZ = 0;
         /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
         const revealThreshold = (i < numChunksA) ? (i / Math.max(1, numChunksA)) : 0;
@@ -4843,11 +4856,20 @@ async function performRealtimeUpdate() {
           } else {
             activeChunkB = Math.floor(beatsB) % Math.max(1, numChunksB);
           }
-          targetScaleFactor = (i === activeChunkB) ? 1.2 : 1.0;
+          if (i === activeChunkB) {
+            targetScaleFactor = 2.0; // pulse to 200%
+            const seedB = Math.floor(beatsB); // new random orientation each beat
+            rX = (pseudoRandom(seedB, i + 300) - 0.5) * Math.PI * 2;
+            rY = (pseudoRandom(seedB, i + 400) - 0.5) * Math.PI * 2;
+            rZ = (pseudoRandom(seedB, i + 500) - 0.5) * Math.PI * 2;
+          } else {
+            targetScaleFactor = 1.0;
+            rX = 0; rY = 0; rZ = 0;
+          }
         } else {
           targetScaleFactor = 1.0;
+          rX = 0; rY = 0; rZ = 0;
         }
-        rX = 0; rY = 0; rZ = 0;
         /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
         const revealThreshold = (i < numChunksB) ? (i / Math.max(1, numChunksB)) : 0;
@@ -4933,9 +4955,19 @@ async function performRealtimeUpdate() {
         if (i < numChunksC) {
           const beatsC = (now / 1000) * (bpmC / 60);
           const activeChunkC = Math.floor(beatsC) % Math.max(1, numChunksC);
-          targetScaleFactor = (i === activeChunkC) ? 1.2 : 1.0;
+          if (i === activeChunkC) {
+            targetScaleFactor = 2.0; // pulse to 200%
+            const seedC = Math.floor(beatsC);
+            rX = (pseudoRandom(seedC, i + 300) - 0.5) * Math.PI * 2;
+            rY = (pseudoRandom(seedC, i + 400) - 0.5) * Math.PI * 2;
+            rZ = (pseudoRandom(seedC, i + 500) - 0.5) * Math.PI * 2;
+          } else {
+            targetScaleFactor = 1.0;
+            rX = 0; rY = 0; rZ = 0;
+          }
         } else {
           targetScaleFactor = 1.0;
+          rX = 0; rY = 0; rZ = 0;
         }
         playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
         /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
@@ -4956,18 +4988,17 @@ async function performRealtimeUpdate() {
       const scaleC = targetDist / boundsC.maxDist;
       const activeScale = Math.max(0.0001, currentScalesC[i] * scaleC);
 
-      // #9: Pitch extreme (master FX) → per-chunk rotation + position chaos for Deck C.
+      // #9: Pitch extreme (master FX) adds to the per-chunk rotation chaos.
       if (pitchExtremeM > 0) {
         const _pSeed = pitchTimeSeed ^ (i * 7919);
-        const _rX = (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
-        const _rY = (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
-        const _rZ = (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
-        _scratchEuler.set(_rX, _rY, _rZ);
-        _scratchQRandom.setFromEuler(_scratchEuler);
-        _scratchQ.setFromAxisAngle(_yAxis, playAngleC).multiply(_scratchQRandom);
-      } else {
-        _scratchQ.setFromAxisAngle(_yAxis, playAngleC);
+        rX += (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
+        rY += (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
+        rZ += (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
       }
+      // Apply pulse/pitch random orientation (identity when all zero) + spin.
+      _scratchEuler.set(rX, rY, rZ);
+      _scratchQRandom.setFromEuler(_scratchEuler);
+      _scratchQ.setFromAxisAngle(_yAxis, playAngleC).multiply(_scratchQRandom);
       _scratchV.copy(boundsC.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(activeScale);
@@ -5003,9 +5034,19 @@ async function performRealtimeUpdate() {
         if (i < numChunksD) {
           const beatsD = (now / 1000) * (bpmD / 60);
           const activeChunkD = Math.floor(beatsD) % Math.max(1, numChunksD);
-          targetScaleFactor = (i === activeChunkD) ? 1.2 : 1.0;
+          if (i === activeChunkD) {
+            targetScaleFactor = 2.0; // pulse to 200%
+            const seedD = Math.floor(beatsD);
+            rX = (pseudoRandom(seedD, i + 300) - 0.5) * Math.PI * 2;
+            rY = (pseudoRandom(seedD, i + 400) - 0.5) * Math.PI * 2;
+            rZ = (pseudoRandom(seedD, i + 500) - 0.5) * Math.PI * 2;
+          } else {
+            targetScaleFactor = 1.0;
+            rX = 0; rY = 0; rZ = 0;
+          }
         } else {
           targetScaleFactor = 1.0;
+          rX = 0; rY = 0; rZ = 0;
         }
         playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
         /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
@@ -5026,18 +5067,17 @@ async function performRealtimeUpdate() {
       const scaleD = targetDist / boundsD.maxDist;
       const activeScale = Math.max(0.0001, currentScalesD[i] * scaleD);
 
-      // #9: Pitch extreme (master FX) → per-chunk rotation + position chaos for Deck D.
+      // #9: Pitch extreme (master FX) adds to the per-chunk rotation chaos.
       if (pitchExtremeM > 0) {
         const _pSeed = pitchTimeSeed ^ (i * 7919);
-        const _rX = (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
-        const _rY = (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
-        const _rZ = (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
-        _scratchEuler.set(_rX, _rY, _rZ);
-        _scratchQRandom.setFromEuler(_scratchEuler);
-        _scratchQ.setFromAxisAngle(_yAxis, playAngleD).multiply(_scratchQRandom);
-      } else {
-        _scratchQ.setFromAxisAngle(_yAxis, playAngleD);
+        rX += (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
+        rY += (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
+        rZ += (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
       }
+      // Apply pulse/pitch random orientation (identity when all zero) + spin.
+      _scratchEuler.set(rX, rY, rZ);
+      _scratchQRandom.setFromEuler(_scratchEuler);
+      _scratchQ.setFromAxisAngle(_yAxis, playAngleD).multiply(_scratchQRandom);
       _scratchV.copy(boundsD.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(activeScale);
