@@ -454,7 +454,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">16</span></span>
-            <input type="range" id="chunks-slider-a" class="max-chunks" min="1" max="16" step="1" value="16" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-a" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -530,7 +530,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">16</span></span>
-            <input type="range" id="chunks-slider-b" class="max-chunks" min="1" max="16" step="1" value="16" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-b" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -3514,7 +3514,8 @@ async function rebuildViewerBuffers() {
 
     if (sceneA) {
       const fxSceneA = processFx(sceneA, 'deckA');
-      const chunksA = sliceIntoSpheres(fxSceneA, Number(document.querySelector('#chunks-slider-a').value) || 16);
+      const CHUNK_STEPS = [4, 8, 16, 32];
+      const chunksA = sliceIntoSpheres(fxSceneA, CHUNK_STEPS[Math.round(Number(document.querySelector('#chunks-slider-a').value))] || 16);
       for (const c of chunksA) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3534,7 +3535,8 @@ async function rebuildViewerBuffers() {
 
     if (sceneB) {
       const fxSceneB = processFx(sceneB, 'deckB');
-      const chunksB = sliceIntoSpheres(fxSceneB, Number(document.querySelector('#chunks-slider-b').value) || 16);
+      const CHUNK_STEPS_B = [4, 8, 16, 32];
+      const chunksB = sliceIntoSpheres(fxSceneB, CHUNK_STEPS_B[Math.round(Number(document.querySelector('#chunks-slider-b').value))] || 16);
       for (const c of chunksB) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3554,7 +3556,8 @@ async function rebuildViewerBuffers() {
 
     if (sceneC) {
       const fxSceneC = processFx(sceneC, 'deckC');
-      const chunksC = sliceIntoSpheres(fxSceneC, Number(document.querySelector('#chunks-slider-c')?.value) || 16);
+      const CHUNK_STEPS_C = [4, 8, 16, 32];
+      const chunksC = sliceIntoSpheres(fxSceneC, CHUNK_STEPS_C[Math.round(Number(document.querySelector('#chunks-slider-c')?.value))] || 16);
       for (const c of chunksC) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -3567,7 +3570,8 @@ async function rebuildViewerBuffers() {
 
     if (sceneD) {
       const fxSceneD = processFx(sceneD, 'deckD');
-      const chunksD = sliceIntoSpheres(fxSceneD, Number(document.querySelector('#chunks-slider-d')?.value) || 16);
+      const CHUNK_STEPS_D = [4, 8, 16, 32];
+      const chunksD = sliceIntoSpheres(fxSceneD, CHUNK_STEPS_D[Math.round(Number(document.querySelector('#chunks-slider-d')?.value))] || 16);
       for (const c of chunksD) {
         const buf = convertSplatDataToBuffer(c);
         if (buf) {
@@ -4173,7 +4177,10 @@ document.addEventListener('input', (e) => {
   if (e.target && e.target.id && e.target.id.startsWith('chunks-slider-')) {
     const deck = e.target.id.split('-').pop();
     const valEl = document.getElementById(`chunks-val-${deck}`);
-    if (valEl) valEl.textContent = e.target.value;
+    // Slider is index 0-3 → actual chunk count [4,8,16,32]
+    const CHUNK_STEPS = [4, 8, 16, 32];
+    const chunkCount = CHUNK_STEPS[Math.round(parseFloat(e.target.value))] || 16;
+    if (valEl) valEl.textContent = chunkCount;
     const min = parseFloat(e.target.min), max = parseFloat(e.target.max);
     const pct = ((parseFloat(e.target.value) - min) / (max - min) * 100).toFixed(1) + '%';
     e.target.style.background = `linear-gradient(to right, #f97316 0%, #f97316 ${pct}, #2a2a2a ${pct}, #2a2a2a 100%)`;
@@ -4520,15 +4527,23 @@ async function performRealtimeUpdate() {
       if (isPlaying) {
         targetVisible = crossGainA > 0.01;
         beatScaleMult = 1.0;
-        // --- NEW PLAY ANIMATION: looping 16-chunk sequential scale-up reveal + spin ---
-        // cyclePos goes 0→1 over REVEAL_PERIOD seconds, then wraps (chunks reset and re-reveal).
+        // --- PULSE PLAY ANIMATION: one chunk at 120%, advances one chunk per beat, outer→inner clockwise ---
+        // All chunks stay at 1.0 scale; the active chunk (one per beat) scales up to 1.2.
+        // Roll chunks (i >= numChunksA) are always fully revealed and not pulsed.
+        if (i < numChunksA && isPlayingA) {
+          const beatsA = (now / 1000) * (bpmA / 60);
+          const activeChunkA = Math.floor(beatsA) % Math.max(1, numChunksA);
+          targetScaleFactor = (i === activeChunkA) ? 1.2 : 1.0;
+        } else {
+          targetScaleFactor = 1.0;
+        }
+        rX = 0; rY = 0; rZ = 0;
+        /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
-        // Chunk i reveals when cyclePos passes its threshold (i / numChunksA).
-        // Roll chunks (i >= numChunksA) are always fully revealed during play.
         const revealThreshold = (i < numChunksA) ? (i / Math.max(1, numChunksA)) : 0;
         targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
-        // No per-chunk random Euler rotation — spin is the whole-object playAngle below.
         rX = 0; rY = 0; rZ = 0;
+        --- END PREVIOUS PLAY ANIMATION --- */
         /* --- PREVIOUS PLAY ANIMATION (random shuffle) — kept for reference ---
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
@@ -4587,11 +4602,21 @@ async function performRealtimeUpdate() {
       if (isPlaying) {
         targetVisible = crossGainB > 0.01;
         beatScaleMult = 1.0;
-        // --- NEW PLAY ANIMATION: looping 16-chunk sequential scale-up reveal + spin ---
+        // --- PULSE PLAY ANIMATION: one chunk at 120%, advances one chunk per beat, outer→inner clockwise ---
+        if (i < numChunksB && isPlayingB) {
+          const beatsB = (now / 1000) * (bpmB / 60);
+          const activeChunkB = Math.floor(beatsB) % Math.max(1, numChunksB);
+          targetScaleFactor = (i === activeChunkB) ? 1.2 : 1.0;
+        } else {
+          targetScaleFactor = 1.0;
+        }
+        rX = 0; rY = 0; rZ = 0;
+        /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
         const revealThreshold = (i < numChunksB) ? (i / Math.max(1, numChunksB)) : 0;
         targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
         rX = 0; rY = 0; rZ = 0;
+        --- END PREVIOUS PLAY ANIMATION --- */
         /* --- PREVIOUS PLAY ANIMATION (random shuffle) — kept for reference ---
         targetScaleFactor = 1.0;
         beatScaleMult = 1.0; // Play scaling disabled as requested
@@ -4646,11 +4671,23 @@ async function performRealtimeUpdate() {
       
       if (isPlayingC) {
         targetVisible = true;
-        // --- NEW PLAY ANIMATION: looping sequential scale-up reveal + spin ---
+        // --- PULSE PLAY ANIMATION: one chunk at 120%, advances one chunk per beat, outer→inner clockwise ---
+        // Deck C uses its tempo slider to derive BPM (50 = 120 BPM, proportional scaling).
+        const bpmC = 120 * (Number(tempoCEl?.value) || 50) / 50;
+        if (i < numChunksC) {
+          const beatsC = (now / 1000) * (bpmC / 60);
+          const activeChunkC = Math.floor(beatsC) % Math.max(1, numChunksC);
+          targetScaleFactor = (i === activeChunkC) ? 1.2 : 1.0;
+        } else {
+          targetScaleFactor = 1.0;
+        }
+        playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
+        /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
         const revealThreshold = (i < numChunksC) ? (i / Math.max(1, numChunksC)) : 0;
         targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
         playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
+        --- END PREVIOUS PLAY ANIMATION --- */
         /* --- PREVIOUS PLAY ANIMATION (always full scale) — kept for reference ---
         targetScaleFactor = 1.0;
         playAngleC += 0.02 * (Number(tempoCEl?.value) || 50) / 50;
@@ -4685,11 +4722,23 @@ async function performRealtimeUpdate() {
       
       if (isPlayingD) {
         targetVisible = true;
-        // --- NEW PLAY ANIMATION: looping sequential scale-up reveal + spin ---
+        // --- PULSE PLAY ANIMATION: one chunk at 120%, advances one chunk per beat, outer→inner clockwise ---
+        // Deck D uses its tempo slider to derive BPM (50 = 120 BPM, proportional scaling).
+        const bpmD = 120 * (Number(tempoDEl?.value) || 50) / 50;
+        if (i < numChunksD) {
+          const beatsD = (now / 1000) * (bpmD / 60);
+          const activeChunkD = Math.floor(beatsD) % Math.max(1, numChunksD);
+          targetScaleFactor = (i === activeChunkD) ? 1.2 : 1.0;
+        } else {
+          targetScaleFactor = 1.0;
+        }
+        playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
+        /* --- PREVIOUS PLAY ANIMATION (sequential reveal) — kept for reference ---
         const cyclePos = ((now / 1000) / REVEAL_PERIOD) % 1;
         const revealThreshold = (i < numChunksD) ? (i / Math.max(1, numChunksD)) : 0;
         targetScaleFactor = (cyclePos >= revealThreshold) ? 1.0 : 0.0;
         playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;
+        --- END PREVIOUS PLAY ANIMATION --- */
         /* --- PREVIOUS PLAY ANIMATION (always full scale) — kept for reference ---
         targetScaleFactor = 1.0;
         playAngleD += 0.02 * (Number(tempoDEl?.value) || 50) / 50;

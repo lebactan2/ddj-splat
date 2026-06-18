@@ -113,5 +113,36 @@ export function sliceIntoSpheres(splatData, numChunks = 32) {
     chunkOffsets[chunkIdx] += 32;
   }
 
-  return chunks.filter(c => c.length > 0).map(chunk => new SplatData(chunk));
+  // 5. Build SplatData objects with centroid metadata for ordering
+  const rawChunks = chunks
+    .map((buf, idx) => ({ buf, idx }))
+    .filter(({ buf }) => buf.length > 0)
+    .map(({ buf }) => {
+      const sd = new SplatData(buf);
+      // Compute centroid of this chunk relative to overall center
+      const cview = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      const n = buf.length / 32;
+      let sumX = 0, sumY = 0, sumZ = 0;
+      for (let j = 0; j < n; j++) {
+        const base = j * 32;
+        sumX += cview.getFloat32(base + 0, true) - cx;
+        sumY += cview.getFloat32(base + 4, true) - cy;
+        sumZ += cview.getFloat32(base + 8, true) - cz;
+      }
+      const dx = sumX / n;
+      const dy = sumY / n;
+      const dz = sumZ / n;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Clockwise angle: negate atan2 so increasing angle goes clockwise (when viewed from above)
+      const angle = -Math.atan2(dz, dx);
+      return { sd, dist, angle };
+    });
+
+  // Sort: outer first (dist descending), then clockwise (angle ascending after negation)
+  rawChunks.sort((a, b) => {
+    if (Math.abs(a.dist - b.dist) > 1e-6) return b.dist - a.dist; // outer first
+    return a.angle - b.angle; // clockwise within same ring
+  });
+
+  return rawChunks.map(r => r.sd);
 }
