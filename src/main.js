@@ -305,7 +305,7 @@ const DECK_KEYS = ['a', 'b', 'c', 'd'];
 function _currentZoomFactor() {
   if (!masterVol) return 1.0;
   const t = Number(masterVol.value) / 100;
-  return Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
+  return Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.5) * 1.5));
 }
 
 // List of currently loaded decks, in fixed A,B,C,D order.
@@ -485,7 +485,7 @@ appDiv.innerHTML = `
         <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-a" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
-          <span id="tempo-range-label-a" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';">±10%</span>
+          <button id="tempo-range-label-a" onclick="window._cycleTempoRange('a')" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';background:transparent;border:1px solid #f97316;border-radius:3px;padding:1px 4px;cursor:pointer;line-height:1.2;">±10%</button>
         </div>
       </div>
     </div>
@@ -563,7 +563,7 @@ appDiv.innerHTML = `
        <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
           <div class="bpm-display" id="bpm-b" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
-          <span id="tempo-range-label-b" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';">±10%</span>
+          <button id="tempo-range-label-b" onclick="window._cycleTempoRange('b')" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';background:transparent;border:1px solid #f97316;border-radius:3px;padding:1px 4px;cursor:pointer;line-height:1.2;">±10%</button>
         </div>
       </div>
     </div>
@@ -628,13 +628,6 @@ appDiv.innerHTML = `
     
     <div class="flex-row" style="gap:10px; margin-left:auto;">
       <div class="flex-row" style="align-items:center; gap:4px;">
-        <button id="btn-strobe" class="util-btn" style="font-size:9px; padding:2px 5px;">STROBE</button>
-        <select id="strobe-mode" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
-          <option value="side">SIDE</option>
-          <option value="full">FULL</option>
-        </select>
-      </div>
-      <div class="flex-row" style="align-items:center; gap:4px;">
         <span class="knob-label" style="margin-right:4px;">MIDI</span>
         <select id="midi-device" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
           <option value="ddj-400">DDJ-400</option>
@@ -642,15 +635,6 @@ appDiv.innerHTML = `
         </select>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
         <input id="midi-import-file" type="file" accept="application/json,.json" style="display:none;" />
-      </div>
-      <div class="flex-row" style="align-items:center;">
-        <span class="knob-label" style="margin-right:4px;">HDRI</span>
-        <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:3px 4px; border-radius:4px; cursor:pointer;">
-          <option value="none">NONE</option><option value="sunset">SUNSET</option><option value="studio">STUDIO</option>
-          <option value="night">NIGHT</option><option value="forest">FOREST</option>
-          <option value="google-map">GOOGLE MAP</option>
-          <option value="custom-url">URL...</option><option value="local-file">FILE...</option>
-        </select>
       </div>
     </div>
 
@@ -751,15 +735,31 @@ appDiv.innerHTML = `
         <input type="range" min="0" max="100" value="50" class="crossfader-slider" id="crossfader" style="width:200px; height:16px;">
         <div class="flex-row" style="gap:4px;">
           <span style="font-size:9px; font-weight:bold; color:#888;">MST VOL</span>
-          <input type="range" min="0" max="100" value="80" class="knob knob-small" id="master-vol">
+          <input type="range" min="0" max="100" value="50" class="knob knob-small" id="master-vol">
         </div>
       </div>
-      <div class="flex-row" style="gap:12px; align-items:center; justify-content:center;">
+      <div class="flex-row" style="gap:10px; align-items:center; justify-content:center; flex-wrap:wrap;">
         <div class="knob-cell" style="flex-direction:row;">
           <span class="knob-label">DOF</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-dof">
         </div>
         <div class="knob-cell" style="flex-direction:row;">
           <span class="knob-label">FLARE</span><input type="range" min="0" max="100" value="0" class="knob knob-small" id="knob-lensflare">
+        </div>
+        <div class="flex-row" style="align-items:center; gap:3px;">
+          <button id="btn-strobe" class="util-btn" style="font-size:9px; padding:2px 5px;">STROBE</button>
+          <select id="strobe-mode" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
+            <option value="side">SIDE</option>
+            <option value="full">FULL</option>
+          </select>
+        </div>
+        <div class="flex-row" style="align-items:center; gap:3px;">
+          <span class="knob-label">HDRI</span>
+          <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
+            <option value="none">NONE</option><option value="sunset">SUNSET</option><option value="studio">STUDIO</option>
+            <option value="night">NIGHT</option><option value="forest">FOREST</option>
+            <option value="google-map">GOOGLE MAP</option>
+            <option value="custom-url">URL...</option><option value="local-file">FILE...</option>
+          </select>
         </div>
       </div>
     </div>
@@ -1245,7 +1245,7 @@ window.addEventListener('resize', resizeViewer);
 window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'h') {
     // Reset Master Vol to default FIRST so centerCamera frames at the default zoom
-    if (masterVol) { masterVol.value = 80; updateKnobFill(masterVol); }
+    if (masterVol) { masterVol.value = 50; updateKnobFill(masterVol); }
     if (typeof centerCamera === 'function') centerCamera();
   }
 });
@@ -2255,12 +2255,12 @@ crossfader.addEventListener('input', () => {
 });
 
 // ── Master Volume → Camera Zoom ──
-// vol=80 → factor 1.0 (neutral); higher vol → zoom in; lower vol → zoom out
+// vol=50 → factor 1.0 (neutral); higher vol → zoom in; lower vol → zoom out
 if (masterVol) {
   masterVol.addEventListener('input', () => {
     if (!viewer || !viewer.controls) return;
     const t = Number(masterVol.value) / 100;
-    let factor = 1.0 - (t - 0.8) * 1.5;
+    let factor = 1.0 - (t - 0.5) * 1.5;
     factor = Math.max(0.4, Math.min(1.8, factor));
     const targetPos = viewer.controls.target;
     const camPos = viewer.camera.position;
@@ -3075,8 +3075,8 @@ async function makeViewer() {
       if (!viewer || !viewer.controls || !masterVol || baseFramedDistance <= 0) return;
       const currentDist = viewer.camera.position.distanceTo(viewer.controls.target);
       const factor = currentDist / baseFramedDistance;
-      // Invert: factor = 1.0 - (t - 0.8)*1.5  =>  t = 0.8 - (factor - 1.0)/1.5
-      const t = 0.8 - (factor - 1.0) / 1.5;
+      // Invert: factor = 1.0 - (t - 0.5)*1.5  =>  t = 0.5 - (factor - 1.0)/1.5
+      const t = 0.5 - (factor - 1.0) / 1.5;
       const vol = Math.max(0, Math.min(100, Math.round(t * 100)));
       masterVol.value = vol;
       updateKnobFill(masterVol);
@@ -3108,7 +3108,7 @@ function centerCamera() {
   let zoomFactor = 1.0;
   if (masterVol) {
     const t = Number(masterVol.value) / 100;
-    zoomFactor = Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.8) * 1.5));
+    zoomFactor = Math.max(0.4, Math.min(1.8, 1.0 - (t - 0.5) * 1.5));
   }
   const camDist = distance * zoomFactor;
 
