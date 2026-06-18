@@ -81,6 +81,17 @@ let strobeStrength = 0;
 let strobeUMode = 0;
 let strobeUEdge = 0;
 
+// OVERLAY (#7/#10): base (pre-crossfade) trans-strobe alpha per deck, plus the
+// A/B crossfader mix. The animation loop computes these each frame; the render
+// pass folds the crossfade gain into the splat opacity uniforms PER DECK while
+// compositing the full-screen overlay (deck A = 1-mix, deck B = mix, C/D = 1).
+let strobeAlphaBaseA = 1.0;
+let strobeAlphaBaseB = 1.0;
+let crossfadeMix = 0.5;
+// Test/telemetry: per-deck opacity actually applied during the last overlay pass
+// (used to verify the crossfade wiring under headless GL where splats don't paint).
+window._lastOverlayOpacity = { a: 1, b: 1 };
+
 let sceneA = null;
 let sceneB = null;
 let sceneC = null;
@@ -3295,36 +3306,6 @@ function setupPostProcessingAndLensFlare() {
     strobeScene.add(quad);
   }
 
-  // MULTI-VIEW layout: given N loaded decks and a buffer (W,H) in pixels, return
-  // an array of panel rects {x,y,w,h} in WebGL viewport coords (origin bottom-left).
-  // 1 → fullscreen; 2 → side-by-side; 3 → 2 top + 1 bottom-spanning; 4 → 2x2.
-  function computeLayoutRects(n, W, H) {
-    const r = [];
-    if (n <= 1) {
-      r.push({ x: 0, y: 0, w: W, h: H });
-    } else if (n === 2) {
-      const hw = Math.floor(W / 2);
-      r.push({ x: 0, y: 0, w: hw, h: H });
-      r.push({ x: hw, y: 0, w: W - hw, h: H });
-    } else if (n === 3) {
-      const hw = Math.floor(W / 2);
-      const hh = Math.floor(H / 2);
-      // Two on top row, one spanning the bottom row.
-      r.push({ x: 0,  y: hh, w: hw,     h: H - hh });
-      r.push({ x: hw, y: hh, w: W - hw, h: H - hh });
-      r.push({ x: 0,  y: 0,  w: W,      h: hh });
-    } else {
-      const hw = Math.floor(W / 2);
-      const hh = Math.floor(H / 2);
-      // 2x2: top-left, top-right, bottom-left, bottom-right.
-      r.push({ x: 0,  y: hh, w: hw,     h: H - hh });
-      r.push({ x: hw, y: hh, w: W - hw, h: H - hh });
-      r.push({ x: 0,  y: 0,  w: hw,     h: hh });
-      r.push({ x: hw, y: 0,  w: W - hw, h: hh });
-    }
-    return r;
-  }
-
   const renderPass = {
     enabled: true,
     needsSwap: true,
@@ -3341,15 +3322,25 @@ function setupPostProcessingAndLensFlare() {
       const mesh = viewer.splatMesh;
       const sceneCount = mesh ? mesh.getSceneCount() : 0;
 
-      // ── Single-deck (or none) fast path: full-screen, no scissor (no regression).
-      if (keys.length <= 1) {
-        if (viewer.threeScene) renderer.render(viewer.threeScene, viewer.camera);
+      // Helper: drive the screen-space strobe overlay (full-screen) once.
+      const renderStrobe = () => {
         if (strobeMaterial && strobeStrength > 0.001) {
           strobeMaterial.uniforms.uStrength.value = strobeStrength;
           strobeMaterial.uniforms.uMode.value = strobeUMode;
           strobeMaterial.uniforms.uEdge.value = strobeUEdge;
           renderer.render(strobeScene, strobeCamera);
         }
+      };
+
+      // ── Single-deck (or none) fast path: full-screen, no crossfade (no regression).
+      if (keys.length <= 1) {
+        // A lone deck always renders at full opacity regardless of crossfader.
+        if (mesh && mesh.material && mesh.material.uniforms.uStrobeAlphaA) {
+          mesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaBaseA;
+          mesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaBaseB;
+        }
+        if (viewer.threeScene) renderer.render(viewer.threeScene, viewer.camera);
+        renderStrobe();
         if (mesh) renderer.render(mesh, viewer.camera);
         if (viewer.sceneHelper) {
           if (viewer.sceneHelper.getFocusMarkerOpacity() > 0.0)
@@ -3362,18 +3353,28 @@ function setupPostProcessingAndLensFlare() {
         return;
       }
 
-      // ── Multi-deck: one viewport panel per loaded deck, each with its own camera.
-      // SORT CAVEAT: the library sorts splats once per frame against viewer.camera
-      // (the primary/first-loaded deck). Non-primary panels reuse that order, so
-      // their front-to-back alpha ordering is approximate. Acceptable for typical
-      // scenes; see report. We cannot synchronously re-sort per panel (worker is
-      // async + single shared index buffer).
+      // ── Multi-deck OVERLAY (#7): every loaded deck is drawn FULL-SCREEN, each
+      // with its own independent camera, composited on top of one another into a
+      // single unified image (no screen division / no scissor).
+      //
+      // Compositing order:
+      //   1. Draw the background (viewer.threeScene) ONCE, before the deck loop,
+      //      so it is not re-drawn opaque on top of an earlier deck's splats.
+      //   2. For each loaded deck: isolate its chunk scenes visible, set its
+      //      crossfade opacity, and render the shared splatMesh full-screen with
+      //      that deck's camera. autoClear stays false so decks accumulate.
+      //
+      // SORT CAVEAT (unchanged/acceptable): the library sorts splats once per
+      // frame against viewer.camera, which we keep synced to the primary (first
+      // loaded) deck. Other decks reuse that order, so their internal front-to-back
+      // alpha ordering is approximate. We cannot synchronously re-sort per deck
+      // (the sort worker is async over a single shared index buffer).
       const size = new THREE.Vector2();
       renderer.getSize(size);
       const pr = renderer.getPixelRatio();
       const W = Math.floor(size.x * pr);
       const H = Math.floor(size.y * pr);
-      const rects = computeLayoutRects(keys.length, W, H);
+      const fullAspect = W / Math.max(1, H);
       const ranges = deckSceneRanges();
 
       // Save current per-scene visibility so we can restore after the loop.
@@ -3395,40 +3396,54 @@ function setupPostProcessingAndLensFlare() {
         }
       };
 
-      renderer.setScissorTest(true);
+      // Full buffer for all draws (no scissor panels).
+      renderer.setViewport(0, 0, W, H);
+
+      // 1) Background once, with the primary deck's camera.
+      const primaryCam = deckCameras[keys[0]] || viewer.camera;
+      if (viewer.threeScene) renderer.render(viewer.threeScene, primaryCam);
+
+      // Strobe overlay once, full-screen, over the background (before splats).
+      renderStrobe();
+
+      // 2) Composite each deck's splats full-screen over the background.
+      // #10: crossfade opacity — deck A = (1-mix), deck B = mix, C/D = full.
+      const mix = crossfadeMix;
+      const matUniforms = (mesh && mesh.material) ? mesh.material.uniforms : null;
       for (let p = 0; p < keys.length; p++) {
         const k = keys[p];
-        const rect = rects[p];
         const cam = deckCameras[k] || viewer.camera;
-        // Match this camera's aspect to its panel so the splat isn't stretched.
-        if (cam.isPerspectiveCamera) {
-          const aspect = rect.w / Math.max(1, rect.h);
-          if (Math.abs(cam.aspect - aspect) > 1e-4) {
-            cam.aspect = aspect;
-            cam.updateProjectionMatrix();
-          }
-        }
-
-        renderer.setViewport(rect.x, rect.y, rect.w, rect.h);
-        renderer.setScissor(rect.x, rect.y, rect.w, rect.h);
-
-        if (viewer.threeScene) renderer.render(viewer.threeScene, cam);
-
-        if (strobeMaterial && strobeStrength > 0.001) {
-          strobeMaterial.uniforms.uStrength.value = strobeStrength;
-          strobeMaterial.uniforms.uMode.value = strobeUMode;
-          strobeMaterial.uniforms.uEdge.value = strobeUEdge;
-          renderer.render(strobeScene, strobeCamera);
+        // Each deck fills the whole frame → match camera aspect to the full buffer.
+        if (cam.isPerspectiveCamera && Math.abs(cam.aspect - fullAspect) > 1e-4) {
+          cam.aspect = fullAspect;
+          cam.updateProjectionMatrix();
         }
 
         if (mesh) {
+          // Fold the A/B crossfade gain into the per-deck opacity uniform without
+          // clobbering the trans-strobe alpha. The shader splits opacity by
+          // sceneIndex into an A branch (uStrobeAlphaA) and a B branch
+          // (uStrobeAlphaB) that covers decks B/C/D. Because we render exactly one
+          // deck per pass (others hidden), we can set the relevant branch's value
+          // for THIS deck only: A → 1-mix, B → mix, C/D → 1.
+          if (matUniforms && matUniforms.uStrobeAlphaA) {
+            if (k === 'a') {
+              matUniforms.uStrobeAlphaA.value = strobeAlphaBaseA * (1 - mix);
+              window._lastOverlayOpacity.a = matUniforms.uStrobeAlphaA.value;
+            } else if (k === 'b') {
+              matUniforms.uStrobeAlphaB.value = strobeAlphaBaseB * mix;
+              window._lastOverlayOpacity.b = matUniforms.uStrobeAlphaB.value;
+            } else {
+              // C/D live in the shader's B branch → full opacity.
+              matUniforms.uStrobeAlphaB.value = strobeAlphaBaseB;
+            }
+          }
           setDeckVisible(k);
           renderer.render(mesh, cam);
         }
       }
 
       // Restore full-frame state + original visibility.
-      renderer.setScissorTest(false);
       renderer.setViewport(0, 0, W, H);
       for (let i = 0; i < sceneCount; i++) {
         const s = viewer.getSplatScene(i);
@@ -4228,10 +4243,12 @@ async function performRealtimeUpdate() {
     const now = Date.now();
     const cuts = parseInt(cutsSlider.value);
     const mixAmount = Number(crossfader.value) / 100;
-    // MULTI-VIEW: decks A/B are now rendered in independent viewport panels, so
-    // the crossfader no longer cross-hides them. Force both gains to 1 so each
-    // deck is fully visible in its own panel. (Crossfader left harmless/unused
-    // for visibility; the multi-view render decides which deck draws per panel.)
+    // OVERLAY (#10): the crossfader controls the A/B OPACITY blend in the
+    // full-screen overlay (deck A opacity = 1-mix, deck B = mix). It must NOT
+    // gate scene VISIBILITY (both decks stay drawn so they can fade); the opacity
+    // is applied per-deck in renderPass via crossfadeMix. Keep the gains at 1 so
+    // the legacy `crossGainA > 0.01` visibility checks below keep decks visible.
+    crossfadeMix = mixAmount;
     const crossGainA = 1.0;
     const crossGainB = 1.0;
 
@@ -4401,10 +4418,17 @@ async function performRealtimeUpdate() {
       strobeAlphaB = isTransOn ? 1.25 : offAlpha;
     }
     
+    // OVERLAY (#10): stash the base (pre-crossfade) trans-strobe alpha. The
+    // render pass folds in the A/B crossfade gain PER DECK (deck A → *(1-mix),
+    // deck B → *mix, C/D → *1) so a single uStrobeAlphaB uniform can serve B and
+    // C/D differently across the overlay passes without clobbering the strobe.
+    strobeAlphaBaseA = strobeAlphaA * crossGainA;
+    strobeAlphaBaseB = strobeAlphaB * crossGainB;
     if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uStrobeAlphaA) {
-      // Combine trans-strobe alpha with the crossfader opacity gain per deck
-      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaA * crossGainA;
-      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaB * crossGainB;
+      // Seed the uniforms with the base values; renderPass overwrites them per
+      // deck during compositing (single-deck path uses these directly).
+      viewer.splatMesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaBaseA;
+      viewer.splatMesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaBaseB;
     }
     
     // STROBE control drives the WebGL screen-space strobe overlay (independent of Trans).
