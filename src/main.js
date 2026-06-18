@@ -2888,6 +2888,20 @@ const FPS_UP_THRESHOLD = 57;         // above -> step resolution up
 const SCALE_COOLDOWN_MS = 1000;      // adjust at most ~once per FPS tick
 const FPS_EMA_ALPHA = 0.4;           // weight of newest sample
 
+// Deck-count-aware render-scale ceiling. Each loaded deck composites full-screen
+// with its own camera, so per-frame GPU cost scales ~linearly with the number of
+// ACTIVELY-RENDERED decks. To keep 3-4 decks playable we cap the resolution as the
+// active-deck count rises. The effective render scale = min(fpsAdaptiveNotch,
+// deckCountCeiling), so this composes with (never fights) the FPS controller.
+// Index by active-deck count: [0]=>1.0 (none), 1=>1.0, 2=>0.85, 3=>0.72, 4=>0.6.
+const DECK_COUNT_SCALE_CEILING = [1.0, 1.0, 0.85, 0.72, 0.6];
+let activeRenderedDeckCount = 0;     // decks loaded AND not skipped (set by renderPass)
+let renderScaleDirty = false;        // renderPass requests a deferred applyRenderScale()
+function deckCountScaleCeiling() {
+  const n = Math.max(0, Math.min(DECK_COUNT_SCALE_CEILING.length - 1, activeRenderedDeckCount));
+  return DECK_COUNT_SCALE_CEILING[n];
+}
+
 function getBaseDPR() {
   return Math.min(window.devicePixelRatio || 1, 2);
 }
@@ -2900,7 +2914,9 @@ function getBaseDPR() {
 // (offscreen targets where the overdraw actually happens).
 function applyRenderScale() {
   if (!viewer || !viewer.renderer) return;
-  const scale = RENDER_SCALE_NOTCHES[renderScaleIndex] || 1.0;
+  const fpsNotch = RENDER_SCALE_NOTCHES[renderScaleIndex] || 1.0;
+  // Compose with the deck-count ceiling: take the smaller (lower-res) of the two.
+  const scale = Math.min(fpsNotch, deckCountScaleCeiling());
   const effectiveRatio = getBaseDPR() * scale;
   try {
     viewer.renderer.setPixelRatio(effectiveRatio);
@@ -3476,6 +3492,13 @@ function setupPostProcessingAndLensFlare() {
 
       // ── Single-deck (or none) fast path: full-screen, no crossfade (no regression).
       if (keys.length <= 1) {
+        // Keep the deck-count resolution ceiling in sync (0 or 1 deck → 1.0). This
+        // also restores full resolution when going from multi-deck back to one.
+        // Defer the actual apply to after the pass (see note in multi-deck path).
+        if (keys.length !== activeRenderedDeckCount) {
+          activeRenderedDeckCount = keys.length;
+          renderScaleDirty = true;
+        }
         // A lone deck always renders at full opacity regardless of crossfader.
         if (mesh && mesh.material && mesh.material.uniforms.uStrobeAlphaA) {
           mesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaBaseA;
@@ -3543,19 +3566,56 @@ function setupPostProcessingAndLensFlare() {
       // setViewport with physical px here; Three re-applies pixelRatio and would
       // shrink the image (was the "not full screen with 2+ decks" bug).
 
-      // 1) Background once, with the primary deck's camera.
-      const primaryCam = deckCameras[keys[0]] || viewer.camera;
+      // 2) Composite each deck's splats full-screen over the background.
+      // #10: crossfade opacity — deck A = (1-mix), deck B = mix, C/D = full.
+      const mix = crossfadeMix;
+      const matUniforms = (mesh && mesh.material) ? mesh.material.uniforms : null;
+
+      // Compute each deck's effective composite opacity up front so we can SKIP
+      // near-invisible decks entirely (no scene-visibility toggling, no
+      // renderer.render). At crossfader extremes only one of A/B is drawn; a deck
+      // faded fully out costs nothing.
+      const OPACITY_EPS = 0.01;
+      const deckOpacity = (k) => {
+        if (k === 'a') return strobeAlphaBaseA * (1 - mix);
+        if (k === 'b') return strobeAlphaBaseB * mix;
+        return strobeAlphaBaseB; // C/D → full (B branch)
+      };
+      const drawKeys = keys.filter((k) => deckOpacity(k) > OPACITY_EPS);
+
+      // Keep the primary/sort camera tracking a deck that is actually rendered. The
+      // worker sorts splats against viewer.camera; updateCameraRig synced it to the
+      // first LOADED deck, but if that deck got skipped here, fall back to the first
+      // DRAWN deck so viewer.camera (and the background) still match a visible panel.
+      const primaryKey = (drawKeys.length > 0) ? drawKeys[0] : keys[0];
+      if (drawKeys.length > 0 && primaryKey !== keys[0]) {
+        const pcam = deckCameras[primaryKey];
+        if (pcam) {
+          viewer.camera.position.copy(pcam.position);
+          viewer.camera.up.copy(pcam.up);
+          viewer.camera.lookAt(_camOrigin);
+        }
+      }
+
+      // Maintain the deck-count-aware resolution ceiling: recompute the render
+      // scale only when the actively-rendered deck count changes. We only record
+      // the count here and apply AFTER this pass finishes — applyRenderScale()
+      // resizes the composer's render targets, which must not happen mid-pass
+      // while we are rendering into writeBuffer.
+      if (drawKeys.length !== activeRenderedDeckCount) {
+        activeRenderedDeckCount = drawKeys.length;
+        renderScaleDirty = true;
+      }
+
+      // 1) Background once, with the primary (first DRAWN) deck's camera.
+      const primaryCam = deckCameras[primaryKey] || viewer.camera;
       if (viewer.threeScene) renderer.render(viewer.threeScene, primaryCam);
 
       // Strobe overlay once, full-screen, over the background (before splats).
       renderStrobe();
 
-      // 2) Composite each deck's splats full-screen over the background.
-      // #10: crossfade opacity — deck A = (1-mix), deck B = mix, C/D = full.
-      const mix = crossfadeMix;
-      const matUniforms = (mesh && mesh.material) ? mesh.material.uniforms : null;
-      for (let p = 0; p < keys.length; p++) {
-        const k = keys[p];
+      for (let p = 0; p < drawKeys.length; p++) {
+        const k = drawKeys[p];
         const cam = deckCameras[k] || viewer.camera;
         // Each deck fills the whole frame → match camera aspect to the full buffer.
         if (cam.isPerspectiveCamera && Math.abs(cam.aspect - fullAspect) > 1e-4) {
@@ -3614,6 +3674,13 @@ function setupPostProcessingAndLensFlare() {
 
   viewer.render = function() {
     composer.render();
+    // The renderPass may have detected a change in actively-rendered deck count
+    // and flagged a render-scale update. Apply it here, AFTER the composer pass,
+    // so resizing the render targets never happens mid-pass.
+    if (renderScaleDirty) {
+      renderScaleDirty = false;
+      applyRenderScale();
+    }
   };
 
   const originalResize = viewer.renderer.setSize;
