@@ -4508,6 +4508,14 @@ async function performRealtimeUpdate() {
     const splatMesh = viewer.splatMesh;
     const sceneCount = splatMesh ? splatMesh.getSceneCount() : Infinity;
 
+    // #9: Pitch FX extremeness — how far pitch knob is from centre (0=neutral, 1=min/max).
+    // Used to add per-chunk pseudo-random rotation + position chaos at the knob extremes.
+    const pitchExtremeA = (fxEngagedA && fxActiveA === 'pitch') ? Math.abs(amountA - 0.5) * 2 : 0;
+    const pitchExtremeB = (fxEngagedB && fxActiveB === 'pitch') ? Math.abs(amountB - 0.5) * 2 : 0;
+    const pitchExtremeM = (fxEngagedM && fxActiveM === 'pitch') ? Math.abs(amountM - 0.5) * 2 : 0;
+    // Slow time seed for subtle animation of the chaos (advances ~1 unit per second).
+    const pitchTimeSeed = Math.floor(now * 0.001) & 0xffff;
+
     const volScaleA = Math.max(0.0001, Number(volAEl.value) / 100);
     nudgeXA *= 0.9;
 
@@ -4573,6 +4581,17 @@ async function performRealtimeUpdate() {
       }
       
       const angleA = effectiveAngleA; // jog now orbits the camera, not the object
+
+      // #9: Pitch extreme → per-chunk pseudo-random rotation + position chaos.
+      // extremeA / extremeM: 0 at centre (no chaos), 1 at min/max (full chaos).
+      const _pitchExA = Math.max(pitchExtremeA, pitchExtremeM);
+      if (_pitchExA > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        rX += (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * _pitchExA;
+        rY += (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * _pitchExA;
+        rZ += (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * _pitchExA;
+      }
+
       _scratchEuler.set(rX, rY, rZ);
       _scratchQRandom.setFromEuler(_scratchEuler);
       _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
@@ -4582,6 +4601,15 @@ async function performRealtimeUpdate() {
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
       splatScene.position.x += nudgeXA;
+
+      // #9: Pitch extreme → per-chunk position offset (fraction of object size, won't fling off-screen).
+      if (_pitchExA > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _posScale = boundsA.maxDist * 0.15 * _pitchExA;
+        splatScene.position.x += (pseudoRandom(_pSeed, i + 600) - 0.5) * _posScale;
+        splatScene.position.y += (pseudoRandom(_pSeed, i + 700) - 0.5) * _posScale;
+        splatScene.position.z += (pseudoRandom(_pSeed, i + 800) - 0.5) * _posScale;
+      }
     }
 
     const volScaleB = Math.max(0.0001, Number(volBEl.value) / 100);
@@ -4646,6 +4674,16 @@ async function performRealtimeUpdate() {
       }
 
       const angleB = effectiveAngleB; // jog now orbits the camera, not the object
+
+      // #9: Pitch extreme → per-chunk pseudo-random rotation + position chaos.
+      const _pitchExB = Math.max(pitchExtremeB, pitchExtremeM);
+      if (_pitchExB > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        rX += (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * _pitchExB;
+        rY += (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * _pitchExB;
+        rZ += (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * _pitchExB;
+      }
+
       _scratchEuler.set(rX, rY, rZ);
       _scratchQRandom.setFromEuler(_scratchEuler);
       _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
@@ -4655,6 +4693,15 @@ async function performRealtimeUpdate() {
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
       splatScene.position.x += nudgeXB;
+
+      // #9: Pitch extreme → per-chunk position offset.
+      if (_pitchExB > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _posScale = boundsB.maxDist * 0.15 * _pitchExB;
+        splatScene.position.x += (pseudoRandom(_pSeed, i + 600) - 0.5) * _posScale;
+        splatScene.position.y += (pseudoRandom(_pSeed, i + 700) - 0.5) * _posScale;
+        splatScene.position.z += (pseudoRandom(_pSeed, i + 800) - 0.5) * _posScale;
+      }
     }
 
     // Apply fast GPU transforms and visibility to Scene C
@@ -4700,12 +4747,31 @@ async function performRealtimeUpdate() {
       const scaleC = targetDist / boundsC.maxDist;
       const activeScale = Math.max(0.0001, currentScalesC[i] * scaleC);
 
-      _scratchQ.setFromAxisAngle(_yAxis, playAngleC);
+      // #9: Pitch extreme (master FX) → per-chunk rotation + position chaos for Deck C.
+      if (pitchExtremeM > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _rX = (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
+        const _rY = (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
+        const _rZ = (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
+        _scratchEuler.set(_rX, _rY, _rZ);
+        _scratchQRandom.setFromEuler(_scratchEuler);
+        _scratchQ.setFromAxisAngle(_yAxis, playAngleC).multiply(_scratchQRandom);
+      } else {
+        _scratchQ.setFromAxisAngle(_yAxis, playAngleC);
+      }
       _scratchV.copy(boundsC.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(activeScale);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
+
+      if (pitchExtremeM > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _posScale = boundsC.maxDist * 0.15 * pitchExtremeM;
+        splatScene.position.x += (pseudoRandom(_pSeed, i + 600) - 0.5) * _posScale;
+        splatScene.position.y += (pseudoRandom(_pSeed, i + 700) - 0.5) * _posScale;
+        splatScene.position.z += (pseudoRandom(_pSeed, i + 800) - 0.5) * _posScale;
+      }
     }
 
     // Apply fast GPU transforms and visibility to Scene D
@@ -4751,12 +4817,31 @@ async function performRealtimeUpdate() {
       const scaleD = targetDist / boundsD.maxDist;
       const activeScale = Math.max(0.0001, currentScalesD[i] * scaleD);
 
-      _scratchQ.setFromAxisAngle(_yAxis, playAngleD);
+      // #9: Pitch extreme (master FX) → per-chunk rotation + position chaos for Deck D.
+      if (pitchExtremeM > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _rX = (pseudoRandom(_pSeed, i + 300) - 0.5) * Math.PI * pitchExtremeM;
+        const _rY = (pseudoRandom(_pSeed, i + 400) - 0.5) * Math.PI * pitchExtremeM;
+        const _rZ = (pseudoRandom(_pSeed, i + 500) - 0.5) * Math.PI * pitchExtremeM;
+        _scratchEuler.set(_rX, _rY, _rZ);
+        _scratchQRandom.setFromEuler(_scratchEuler);
+        _scratchQ.setFromAxisAngle(_yAxis, playAngleD).multiply(_scratchQRandom);
+      } else {
+        _scratchQ.setFromAxisAngle(_yAxis, playAngleD);
+      }
       _scratchV.copy(boundsD.center).multiplyScalar(activeScale).applyQuaternion(_scratchQ).negate();
 
       splatScene.scale.setScalar(activeScale);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
+
+      if (pitchExtremeM > 0) {
+        const _pSeed = pitchTimeSeed ^ (i * 7919);
+        const _posScale = boundsD.maxDist * 0.15 * pitchExtremeM;
+        splatScene.position.x += (pseudoRandom(_pSeed, i + 600) - 0.5) * _posScale;
+        splatScene.position.y += (pseudoRandom(_pSeed, i + 700) - 0.5) * _posScale;
+        splatScene.position.z += (pseudoRandom(_pSeed, i + 800) - 0.5) * _posScale;
+      }
     }
 
   } catch (err) {
