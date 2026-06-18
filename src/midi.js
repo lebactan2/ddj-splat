@@ -486,9 +486,13 @@ export const APP_ACTIONS = {
   'loop-active-a': { kind: 'button', el: 'loop-active-a' },
   'loop-half-a':   { kind: 'button', el: 'loop-half-a' },
   'loop-double-a': { kind: 'button', el: 'loop-double-a' },
+  'loop-in-a':     { kind: 'button', el: 'loop-in-a' },
+  'loop-out-a':    { kind: 'button', el: 'loop-out-a' },
   'loop-active-b': { kind: 'button', el: 'loop-active-b' },
   'loop-half-b':   { kind: 'button', el: 'loop-half-b' },
   'loop-double-b': { kind: 'button', el: 'loop-double-b' },
+  'loop-in-b':     { kind: 'button', el: 'loop-in-b' },
+  'loop-out-b':    { kind: 'button', el: 'loop-out-b' },
 
   // ── Misc buttons ──
   'strobe': { kind: 'button', el: 'btn-strobe' },

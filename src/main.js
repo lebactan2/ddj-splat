@@ -177,6 +177,15 @@ let loopLengthA = 1;
 let isAutoLoopA = false;
 let autoLoopLengthA = 4; // 4 beats
 
+// Chunk-range loop state (#8): restrict pulse animation to [start..end] chunk indices.
+// loopChunkStartA/B: first chunk of the range (set by LOOP IN).
+// loopChunkEndA/B: last chunk of the range (set by LOOP OUT, also enables loopActiveA/B).
+// When loopActiveA/B is false the range has no effect on the pulse animation.
+let loopChunkStartA = 0;
+let loopChunkEndA = 0;
+let loopChunkStartB = 0;
+let loopChunkEndB = 0;
+
 let loopActiveB = false;
 let loopStartB = 0;
 let loopLengthB = 1;
@@ -464,6 +473,8 @@ appDiv.innerHTML = `
       <div class="flex-between">
         <span class="section-title" style="margin:0;">LOOP</span>
         <div class="flex-row">
+          <button class="round-btn" id="loop-in-a" title="Loop IN: set chunk range start">IN</button>
+          <button class="round-btn" id="loop-out-a" title="Loop OUT: set chunk range end + enable">OUT</button>
           <button class="round-btn" id="loop-half-a">1/2</button>
           <button class="round-btn" id="loop-active-a">4B</button>
           <button class="round-btn" id="loop-double-a">2X</button>
@@ -540,6 +551,8 @@ appDiv.innerHTML = `
       <div class="flex-between">
         <span class="section-title" style="margin:0;">LOOP</span>
         <div class="flex-row">
+          <button class="round-btn" id="loop-in-b" title="Loop IN: set chunk range start">IN</button>
+          <button class="round-btn" id="loop-out-b" title="Loop OUT: set chunk range end + enable">OUT</button>
           <button class="round-btn" id="loop-half-b">1/2</button>
           <button class="round-btn" id="loop-active-b">4B</button>
           <button class="round-btn" id="loop-double-b">2X</button>
@@ -1833,9 +1846,13 @@ window._buildTableFromImport = buildTableFromImport;
     { id: 'beat-next',      label: 'Beat › (right) → Deck A',           target: 'beat-next-a',       kind: 'button' },
     { id: 'fx-onoff',       label: 'Beat-FX ON/OFF → Deck A',                target: 'fx-toggle-a',       kind: 'button' },
     { id: 'fx-depth',       label: 'Beat-FX LEVEL/DEPTH → Deck A',           target: 'fx-depth-a',        kind: 'knob'   },
+    { id: 'loop-in-a',      label: 'Deck A Loop IN (set chunk range start)',  target: 'loop-in-a',         kind: 'button' },
+    { id: 'loop-out-a',     label: 'Deck A Loop OUT (set chunk range end)',   target: 'loop-out-a',        kind: 'button' },
     { id: 'loop-active-a',  label: 'Deck A 4-beat loop',                     target: 'loop-active-a',     kind: 'button' },
     { id: 'loop-half-a',    label: 'Deck A loop \xbd',                       target: 'loop-half-a',       kind: 'button' },
     { id: 'loop-double-a',  label: 'Deck A loop \xd72',                      target: 'loop-double-a',     kind: 'button' },
+    { id: 'loop-in-b',      label: 'Deck B Loop IN (set chunk range start)',  target: 'loop-in-b',         kind: 'button' },
+    { id: 'loop-out-b',     label: 'Deck B Loop OUT (set chunk range end)',   target: 'loop-out-b',        kind: 'button' },
     { id: 'loop-active-b',  label: 'Deck B 4-beat loop',                     target: 'loop-active-b',     kind: 'button' },
     { id: 'loop-half-b',    label: 'Deck B loop \xbd',                       target: 'loop-half-b',       kind: 'button' },
     { id: 'loop-double-b',  label: 'Deck B loop \xd72',                      target: 'loop-double-b',     kind: 'button' },
@@ -2488,6 +2505,128 @@ function setupAutoLoop(deck) {
 
 setupAutoLoop('a');
 setupAutoLoop('b');
+
+// ── Chunk-Range Loop: IN / OUT buttons (#8) ───────────────────────────────────
+// LOOP IN  → records current activeChunk as loopChunkStart.
+// LOOP OUT → records current activeChunk as loopChunkEnd, enables loopActive.
+// The existing 1/2 / 2X buttons also scale the chunk range when a chunk loop
+// is active (loopChunkStart !== loopChunkEnd).
+// The existing #loop-active-a/b toggle turns the chunk loop off/on.
+function setupChunkLoop(deck) {
+  const isA = deck === 'a';
+  const btnIn  = document.querySelector(`#loop-in-${deck}`);
+  const btnOut = document.querySelector(`#loop-out-${deck}`);
+  const btnActive = document.querySelector(`#loop-active-${deck}`);
+  const btnHalf   = document.querySelector(`#loop-half-${deck}`);
+  const btnDouble = document.querySelector(`#loop-double-${deck}`);
+
+  // Helper: current active chunk index for this deck (0-based, wraps at numChunks)
+  function currentActiveChunk() {
+    const now = performance.now();
+    if (isA) {
+      const bpmA = 120 * (1 + (Number(document.getElementById('tempo-a')?.value) || 0) / 100);
+      return Math.floor((now / 1000) * (bpmA / 60)) % Math.max(1, numChunksA);
+    } else {
+      const bpmB = 120 * (1 + (Number(document.getElementById('tempo-b')?.value) || 0) / 100);
+      return Math.floor((now / 1000) * (bpmB / 60)) % Math.max(1, numChunksB);
+    }
+  }
+
+  function numChunks() { return isA ? Math.max(1, numChunksA) : Math.max(1, numChunksB); }
+
+  // Style helpers for orange highlight
+  function updateInOutHighlight() {
+    if (isA) {
+      btnIn.style.borderColor  = loopActiveA ? '#f97316' : '';
+      btnOut.style.borderColor = loopActiveA ? '#f97316' : '';
+    } else {
+      btnIn.style.borderColor  = loopActiveB ? '#f97316' : '';
+      btnOut.style.borderColor = loopActiveB ? '#f97316' : '';
+    }
+  }
+
+  // LOOP IN — capture current chunk as start, highlight
+  btnIn.addEventListener('click', () => {
+    const ch = currentActiveChunk();
+    if (isA) {
+      loopChunkStartA = ch;
+      // If end < start, push end forward to start (keeps range valid)
+      if (loopChunkEndA < loopChunkStartA) loopChunkEndA = loopChunkStartA;
+    } else {
+      loopChunkStartB = ch;
+      if (loopChunkEndB < loopChunkStartB) loopChunkEndB = loopChunkStartB;
+    }
+    updateInOutHighlight();
+    triggerRealtimeUpdate();
+  });
+
+  // LOOP OUT — capture current chunk as end, enable loop
+  btnOut.addEventListener('click', () => {
+    const ch = currentActiveChunk();
+    if (isA) {
+      loopChunkEndA = ch;
+      // Ensure end >= start
+      if (loopChunkEndA < loopChunkStartA) loopChunkEndA = loopChunkStartA;
+      loopActiveA = true;
+      isAutoLoopA = true;
+      btnActive.classList.add('active');
+    } else {
+      loopChunkEndB = ch;
+      if (loopChunkEndB < loopChunkStartB) loopChunkEndB = loopChunkStartB;
+      loopActiveB = true;
+      isAutoLoopB = true;
+      btnActive.classList.add('active');
+    }
+    updateInOutHighlight();
+    triggerRealtimeUpdate();
+  });
+
+  // Intercept 1/2: if chunk loop is active, halve the chunk range; also run original auto-loop half
+  const origHalf = btnHalf.onclick;
+  btnHalf.addEventListener('click', () => {
+    if (isA && loopActiveA && loopChunkEndA > loopChunkStartA) {
+      const rangeLen = loopChunkEndA - loopChunkStartA + 1;
+      const newLen = Math.max(1, Math.floor(rangeLen / 2));
+      loopChunkEndA = Math.min(numChunks() - 1, loopChunkStartA + newLen - 1);
+      updateInOutHighlight();
+      triggerRealtimeUpdate();
+    } else if (!isA && loopActiveB && loopChunkEndB > loopChunkStartB) {
+      const rangeLen = loopChunkEndB - loopChunkStartB + 1;
+      const newLen = Math.max(1, Math.floor(rangeLen / 2));
+      loopChunkEndB = Math.min(numChunks() - 1, loopChunkStartB + newLen - 1);
+      updateInOutHighlight();
+      triggerRealtimeUpdate();
+    }
+  }, true); // capturing phase so it fires before the original
+
+  // Intercept 2X: if chunk loop is active, double the chunk range
+  btnDouble.addEventListener('click', () => {
+    if (isA && loopActiveA && loopChunkEndA >= loopChunkStartA) {
+      const rangeLen = loopChunkEndA - loopChunkStartA + 1;
+      const newLen = Math.min(numChunks(), rangeLen * 2);
+      loopChunkEndA = Math.min(numChunks() - 1, loopChunkStartA + newLen - 1);
+      updateInOutHighlight();
+      triggerRealtimeUpdate();
+    } else if (!isA && loopActiveB && loopChunkEndB >= loopChunkStartB) {
+      const rangeLen = loopChunkEndB - loopChunkStartB + 1;
+      const newLen = Math.min(numChunks(), rangeLen * 2);
+      loopChunkEndB = Math.min(numChunks() - 1, loopChunkStartB + newLen - 1);
+      updateInOutHighlight();
+      triggerRealtimeUpdate();
+    }
+  }, true); // capturing phase
+
+  // When #loop-active-a/b is clicked and loop is turned off, clear orange highlight
+  btnActive.addEventListener('click', () => {
+    updateInOutHighlight();
+  });
+}
+
+setupChunkLoop('a');
+setupChunkLoop('b');
+
+// Expose loop-in/loop-out as clickable DOM targets for MIDI routing.
+// Since the actions use kind:'button' → clickButton(el), the buttons already work.
 
 btnPlayA.addEventListener('click', () => {
   isPlayingA = !isPlayingA;
@@ -3640,6 +3779,15 @@ async function rebuildViewerBuffers() {
           uniform float uDofFocus;
           uniform float uDofAmount;
           varying float vOpacityMult;
+
+          // #8 Chunk-range loop tint: orange highlight for looped chunks
+          uniform float uLoopActiveA;
+          uniform float uLoopStartA;
+          uniform float uLoopEndA;
+          uniform float uLoopActiveB;
+          uniform float uLoopStartB;
+          uniform float uLoopEndB;
+          varying float vLoopTint;
         ` + shader;
         
         // Inject FX displacement AFTER splatCenter is read but BEFORE viewCenter.
@@ -3734,7 +3882,18 @@ async function rebuildViewerBuffers() {
               faderScale = uFaderScaleB;
               vOpacityMult = uStrobeAlphaB;
           }
-          
+
+          // #8 Chunk-range loop tint: set vLoopTint=1.0 when this splat's scene is in the looped range.
+          // sceneIndex is uint; compare as float after casting.
+          vLoopTint = 0.0;
+          float sceneIdxF = float(sceneIndex);
+          if (isDeckA && uLoopActiveA > 0.5 && sceneIdxF >= uLoopStartA && sceneIdxF <= uLoopEndA) {
+              vLoopTint = 1.0;
+          }
+          if (!isDeckA && uLoopActiveB > 0.5 && sceneIdxF >= uLoopStartB && sceneIdxF <= uLoopEndB) {
+              vLoopTint = 1.0;
+          }
+
           vec4 viewCenter = transformModelViewMatrix * vec4(displacedCenter, 1.0);
           
           float dofScale = 1.0;
@@ -3786,22 +3945,35 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.uniforms.uStrobeAlphaB = { value: 1.0 };
         viewer.splatMesh.material.uniforms.uDofFocus = { value: 4.5 };
         viewer.splatMesh.material.uniforms.uDofAmount = { value: 0.0 };
-        
+
+        // #8 Chunk-range loop tint uniforms
+        viewer.splatMesh.material.uniforms.uLoopActiveA = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uLoopStartA  = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uLoopEndA    = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uLoopActiveB = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uLoopStartB  = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uLoopEndB    = { value: 0.0 };
+
         let fragShader = viewer.splatMesh.material.fragmentShader;
         if (!fragShader.includes('vOpacityMult')) {
           fragShader = `
             varying float vOpacityMult;
+            varying float vLoopTint;
           ` + fragShader;
           fragShader = fragShader.replace(
             'gl_FragColor = vec4(vColor.rgb, w);',
             `
             if (vOpacityMult < 0.001) discard;
-            gl_FragColor = vec4(vColor.rgb, w * vOpacityMult);
+            vec3 tintedColor = mix(vColor.rgb, vec3(1.0, 0.5, 0.0), vLoopTint * 0.7);
+            gl_FragColor = vec4(tintedColor, w * vOpacityMult);
             `
           );
           fragShader = fragShader.replace(
             'gl_FragColor = vec4(color.rgb, opacity);',
-            'gl_FragColor = vec4(color.rgb, opacity * vOpacityMult);'
+            `
+            vec3 tintedColorAlt = mix(color.rgb, vec3(1.0, 0.5, 0.0), vLoopTint * 0.7);
+            gl_FragColor = vec4(tintedColorAlt, opacity * vOpacityMult);
+            `
           );
           viewer.splatMesh.material.fragmentShader = fragShader;
         }
@@ -4388,6 +4560,29 @@ async function performRealtimeUpdate() {
         uniforms.uFxPitchSquashYM.value = 1.0;
         uniforms.uFxPitchStretchXM.value = 1.0;
       }
+
+      // #8 Chunk-range loop tint: update uniforms for orange highlight.
+      // Deck A: scene indices 0..(numChunksA-1). Deck B: numChunksA..(numChunksA+numChunksB-1).
+      // uLoopStart/End are absolute scene indices.
+      if (uniforms.uLoopActiveA !== undefined) {
+        const deckAOffset = 0;
+        const deckBOffset = numChunksA + numRollChunksA;
+        uniforms.uLoopActiveA.value = loopActiveA ? 1.0 : 0.0;
+        uniforms.uLoopStartA.value  = deckAOffset + Math.max(0, loopChunkStartA);
+        uniforms.uLoopEndA.value    = deckAOffset + Math.min(Math.max(0, numChunksA - 1), loopChunkEndA);
+        uniforms.uLoopActiveB.value = loopActiveB ? 1.0 : 0.0;
+        uniforms.uLoopStartB.value  = deckBOffset + Math.max(0, loopChunkStartB);
+        uniforms.uLoopEndB.value    = deckBOffset + Math.min(Math.max(0, numChunksB - 1), loopChunkEndB);
+        // Expose for headless verification
+        window._loopUniforms = {
+          activeA: uniforms.uLoopActiveA.value,
+          startA:  uniforms.uLoopStartA.value,
+          endA:    uniforms.uLoopEndA.value,
+          activeB: uniforms.uLoopActiveB.value,
+          startB:  uniforms.uLoopStartB.value,
+          endB:    uniforms.uLoopEndB.value,
+        };
+      }
     }
 
     const isRollA = (fxEngagedA && fxActiveA === 'roll') || (fxEngagedM && fxActiveM === 'roll');
@@ -4540,7 +4735,14 @@ async function performRealtimeUpdate() {
         // Roll chunks (i >= numChunksA) are always fully revealed and not pulsed.
         if (i < numChunksA && isPlayingA) {
           const beatsA = (now / 1000) * (bpmA / 60);
-          const activeChunkA = Math.floor(beatsA) % Math.max(1, numChunksA);
+          // #8 Chunk-range loop: if loopActiveA, restrict pulse to [loopChunkStartA..loopChunkEndA]
+          let activeChunkA;
+          if (loopActiveA && loopChunkEndA >= loopChunkStartA) {
+            const rangeLen = loopChunkEndA - loopChunkStartA + 1;
+            activeChunkA = loopChunkStartA + (Math.floor(beatsA) % rangeLen);
+          } else {
+            activeChunkA = Math.floor(beatsA) % Math.max(1, numChunksA);
+          }
           targetScaleFactor = (i === activeChunkA) ? 1.2 : 1.0;
         } else {
           targetScaleFactor = 1.0;
@@ -4633,7 +4835,14 @@ async function performRealtimeUpdate() {
         // --- PULSE PLAY ANIMATION: one chunk at 120%, advances one chunk per beat, outer→inner clockwise ---
         if (i < numChunksB && isPlayingB) {
           const beatsB = (now / 1000) * (bpmB / 60);
-          const activeChunkB = Math.floor(beatsB) % Math.max(1, numChunksB);
+          // #8 Chunk-range loop: if loopActiveB, restrict pulse to [loopChunkStartB..loopChunkEndB]
+          let activeChunkB;
+          if (loopActiveB && loopChunkEndB >= loopChunkStartB) {
+            const rangeLen = loopChunkEndB - loopChunkStartB + 1;
+            activeChunkB = loopChunkStartB + (Math.floor(beatsB) % rangeLen);
+          } else {
+            activeChunkB = Math.floor(beatsB) % Math.max(1, numChunksB);
+          }
           targetScaleFactor = (i === activeChunkB) ? 1.2 : 1.0;
         } else {
           targetScaleFactor = 1.0;
