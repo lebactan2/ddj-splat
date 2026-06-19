@@ -47,8 +47,10 @@ const CHANGE_DEBOUNCE_MS = 200;
 // visuals stop jittering without adding noticeable lag to deliberate moves.
 const _smoothVal = {};    // per-element smoothed 0-127 value
 const _lastApplied = {};  // per-element last value actually written
-const SMOOTH_ALPHA = 0.5; // 0..1 — higher = more responsive, lower = smoother
-const DEADZONE = 1.0;     // ignore changes smaller than this (in 0-127 units)
+const SMOOTH_ALPHA = 0.35; // 0..1 — higher = more responsive, lower = smoother
+const DEADZONE = 2.5;      // ignore changes smaller than this (in 0-127 units) —
+                           // suppresses controller ADC rest-jitter (DDJ faders/knobs)
+                           // so it can't flicker visuals or re-trigger buffer rebuilds.
 
 // ── Helper functions ──────────────────────────────────────────────────────────
 
