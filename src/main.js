@@ -530,7 +530,6 @@ appDiv.innerHTML = `
 
     <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
       <button class="round-btn" id="pad-mode-a" title="Pad mode: Hot Cue / Beat Loop (camera) / Beat Jump / Sampler" style="font-size:8px; line-height:1.1; min-width:46px;">HOT CUE</button>
-      <button class="huge-round-btn cue" id="btn-cue-a">C</button>
       <button class="huge-round-btn stop" id="btn-stop-a" style="background:#444; font-size:16px;">⏹</button>
       <button class="huge-round-btn play" id="btn-play-a">▶</button>
     </div>
@@ -610,7 +609,6 @@ appDiv.innerHTML = `
 
     <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
       <button class="round-btn" id="pad-mode-b" title="Pad mode: Hot Cue / Beat Loop (camera) / Beat Jump / Sampler" style="font-size:8px; line-height:1.1; min-width:46px;">HOT CUE</button>
-      <button class="huge-round-btn cue" id="btn-cue-b">C</button>
       <button class="huge-round-btn stop" id="btn-stop-b" style="background:#444; font-size:16px;">⏹</button>
       <button class="huge-round-btn play" id="btn-play-b">▶</button>
     </div>
@@ -2455,10 +2453,8 @@ const syncA = document.querySelector('#sync-a');
 const syncB = document.querySelector('#sync-b');
 
 const btnPlayA = document.querySelector('#btn-play-a');
-const btnCueA = document.querySelector('#btn-cue-a');
 const btnStopA = document.querySelector('#btn-stop-a');
 const btnPlayB = document.querySelector('#btn-play-b');
-const btnCueB = document.querySelector('#btn-cue-b');
 const btnStopB = document.querySelector('#btn-stop-b');
 
 let bpmA = 120.0;
@@ -2748,59 +2744,34 @@ btnPlayB.addEventListener('click', () => {
   triggerRealtimeUpdate();
 });
 
-btnCueA.addEventListener('click', () => {
-  isPlayingA = false;
-  btnPlayA.classList.remove('active');
-  playAngleA = 0;
-  jogAngleA = 0;
-  currentScalesA.fill(0);
-  stopAnimationLoop();
-  setLed('a', 'play', false);
-  flashLed('a', 'cue');
-  triggerRealtimeUpdate();
-  btnCueA.classList.add('active');
-  setTimeout(() => btnCueA.classList.remove('active'), 200);
-});
+function stopDeck(deck, pulseCueLed = false) {
+  const isA = deck === 'a';
+  if (isA) {
+    isPlayingA = false;
+    btnPlayA.classList.remove('active');
+    playAngleA = 0;
+    jogAngleA = 0;
+    currentScalesA.fill(0);
+  } else {
+    isPlayingB = false;
+    btnPlayB.classList.remove('active');
+    playAngleB = 0;
+    jogAngleB = 0;
+    currentScalesB.fill(0);
+  }
 
-btnStopA.addEventListener('click', () => {
-  isPlayingA = false;
-  btnPlayA.classList.remove('active');
-  playAngleA = 0;
-  jogAngleA = 0;
-  currentScalesA.fill(0);
   stopAnimationLoop();
-  setLed('a', 'play', false);
+  setLed(deck, 'play', false);
+  if (pulseCueLed) flashLed(deck, 'cue');
   triggerRealtimeUpdate();
-  btnStopA.classList.add('active');
-  setTimeout(() => btnStopA.classList.remove('active'), 200);
-});
 
-btnCueB.addEventListener('click', () => {
-  isPlayingB = false;
-  btnPlayB.classList.remove('active');
-  playAngleB = 0;
-  jogAngleB = 0;
-  currentScalesB.fill(0);
-  stopAnimationLoop();
-  setLed('b', 'play', false);
-  flashLed('b', 'cue');
-  triggerRealtimeUpdate();
-  btnCueB.classList.add('active');
-  setTimeout(() => btnCueB.classList.remove('active'), 200);
-});
+  const btnStop = document.getElementById(`btn-stop-${deck}`);
+  btnStop?.classList.add('active');
+  setTimeout(() => btnStop?.classList.remove('active'), 200);
+}
 
-btnStopB.addEventListener('click', () => {
-  isPlayingB = false;
-  btnPlayB.classList.remove('active');
-  playAngleB = 0;
-  jogAngleB = 0;
-  currentScalesB.fill(0);
-  stopAnimationLoop();
-  setLed('b', 'play', false);
-  triggerRealtimeUpdate();
-  btnStopB.classList.add('active');
-  setTimeout(() => btnStopB.classList.remove('active'), 200);
-});
+btnStopA.addEventListener('click', () => stopDeck('a', true));
+btnStopB.addEventListener('click', () => stopDeck('b', true));
 
 // ── performance Pads (Hot Cues) ────────────────────────
 // ── Loop pads (physical MIDI hot-cue pads stay loops) ──────────────────────
@@ -5427,6 +5398,8 @@ btnReset.addEventListener('click', async () => {
   for (const d of ['a', 'b']) {
     const tBtn = document.getElementById(`loop-toggle-${d}`);
     if (tBtn) { tBtn.classList.remove('active'); tBtn.textContent = 'GO'; }
+    const activeBtn = document.getElementById(`loop-active-${d}`);
+    if (activeBtn) activeBtn.textContent = '4B';
   }
   // Pad modes back to Hot Cue.
   setPadMode('a', 'hotcue'); setPadMode('b', 'hotcue');
@@ -5459,6 +5432,7 @@ btnReset.addEventListener('click', async () => {
   const btnPlayDEl = document.getElementById('btn-play-d');
   if (btnPlayCEl) btnPlayCEl.style.background = '#111';
   if (btnPlayDEl) btnPlayDEl.style.background = '#111';
+  allLedsOff();
 
   stopAnimationLoop();
 

@@ -212,7 +212,7 @@ const PROFILES = {
         const deckStr = channel === 0 ? 'a' : 'b';
 
         if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause 0x0B
-        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue 0x0C → Stop
+        if (note === 12) clickButton(`btn-stop-${deckStr}`, velocity); // Cue 0x0C → Stop
 
         // Shift (0x3F) → cycle tempo range on press
         if (note === 63 && velocity > 0) { if (window._cycleTempoRange) window._cycleTempoRange(deckStr); }
@@ -327,7 +327,7 @@ const PROFILES = {
       if (channel === 0 || channel === 1) {
         const deckStr = channel === 0 ? 'a' : 'b';
         if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause
-        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue → Stop
+        if (note === 12) clickButton(`btn-stop-${deckStr}`, velocity); // Cue → Stop
 
         // Shift button — Note 63 (0x3F): cycle tempo range on press
         if (note === 63 && velocity > 0) { if (window._cycleTempoRange) window._cycleTempoRange(deckStr); }
@@ -490,8 +490,8 @@ export const APP_ACTIONS = {
   // ── Transport ──
   'play-a': { kind: 'button', el: 'btn-play-a' },
   'play-b': { kind: 'button', el: 'btn-play-b' },
-  'cue-a':  { kind: 'button', el: 'btn-cue-a' },
-  'cue-b':  { kind: 'button', el: 'btn-cue-b' },
+  'cue-a':  { kind: 'button', el: 'btn-stop-a' },
+  'cue-b':  { kind: 'button', el: 'btn-stop-b' },
 
   // ── Loop controls ──
   'loop-active-a': { kind: 'button', el: 'loop-active-a' },
