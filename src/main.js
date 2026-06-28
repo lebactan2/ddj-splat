@@ -185,6 +185,8 @@ let loopChunkStartA = 0;
 let loopChunkEndA = 0;
 let loopChunkStartB = 0;
 let loopChunkEndB = 0;
+let loopRangeSelectedA = false;
+let loopRangeSelectedB = false;
 
 // Loop "commit" state (#6): after a range is selected (orange), the activate/exit
 // button commits it — orange disappears, the selected chunks keep animating, and
@@ -198,6 +200,8 @@ let padModeA = 'hotcue';
 let padModeB = 'hotcue';
 const PAD_MODES = ['hotcue', 'beatloop', 'beatjump', 'sampler'];
 const PAD_MODE_LABELS = { hotcue: 'HOT CUE', beatloop: 'BEAT LOOP', beatjump: 'BEAT JUMP', sampler: 'SAMPLER' };
+const PAD_NUM_LABELS = ['1', '2', '3', '4', '5', '6', '7', '8'];
+const PAD_CAM_LABELS = ['FRONT', 'BACK', 'L', 'R', 'TOP', 'BOT', '3/4L', '3/4R'];
 
 let loopActiveB = false;
 let loopStartB = 0;
@@ -339,8 +343,23 @@ function loadedDeckKeys() {
 function updateCameraRig(mixAmount) {
   if (!viewer || !viewer.controls || !viewer.camera) return;
 
-  // Keep OrbitControls mouse-rotate from fighting the rig (zoom still works).
-  if (viewer.controls.enableRotate !== false) viewer.controls.enableRotate = false;
+  // When no camera preset is easing, let OrbitControls own the camera so normal
+  // mouse rotate/pan/zoom keeps working while decks are playing.
+  viewer.controls.enableRotate = true;
+  viewer.controls.enablePan = true;
+  if (camRigInitialized && !camRigSettling) {
+    for (const k of DECK_KEYS) {
+      let cam = deckCameras[k];
+      if (!cam) {
+        cam = viewer.camera.clone();
+        deckCameras[k] = cam;
+      } else {
+        cam.copy(viewer.camera);
+      }
+      cam.updateMatrixWorld(true);
+    }
+    return;
+  }
 
   const radius = baseFramedDistance * _currentZoomFactor();
   const refCam = viewer.camera;
@@ -476,7 +495,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">16</span></span>
-            <input type="range" id="chunks-slider-a" class="max-chunks" min="0" max="2" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-a" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -488,7 +507,7 @@ appDiv.innerHTML = `
         <div class="flex-row">
           <button class="round-btn" id="loop-in-a" title="Loop IN: set chunk range start">IN</button>
           <button class="round-btn" id="loop-out-a" title="Loop OUT: set chunk range end + enable">OUT</button>
-          <button class="round-btn" id="loop-toggle-a" title="Activate/Exit loop: hide others, keep selection animating">GO</button>
+          <button class="round-btn" id="loop-toggle-a" title="Activate/Exit loop: hide others, keep selection animating" style="display:none;">GO</button>
           <button class="round-btn" id="loop-half-a">1/2</button>
           <button class="round-btn" id="loop-active-a">4B</button>
           <button class="round-btn" id="loop-double-a">2X</button>
@@ -535,10 +554,10 @@ appDiv.innerHTML = `
     </div>
 
     <div class="pads-grid" id="pads-a">
-      <button class="pad-btn" data-pad="0">FRONT</button><button class="pad-btn" data-pad="1">BACK</button>
-      <button class="pad-btn" data-pad="2">L</button><button class="pad-btn" data-pad="3">R</button>
-      <button class="pad-btn" data-pad="4">TOP</button><button class="pad-btn" data-pad="5">BOT</button>
-      <button class="pad-btn" data-pad="6">¾L</button><button class="pad-btn" data-pad="7">¾R</button>
+      <button class="pad-btn" data-pad="0">1</button><button class="pad-btn" data-pad="1">2</button>
+      <button class="pad-btn" data-pad="2">3</button><button class="pad-btn" data-pad="3">4</button>
+      <button class="pad-btn" data-pad="4">5</button><button class="pad-btn" data-pad="5">6</button>
+      <button class="pad-btn" data-pad="6">7</button><button class="pad-btn" data-pad="7">8</button>
     </div>
   </div>
 
@@ -555,7 +574,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">16</span></span>
-            <input type="range" id="chunks-slider-b" class="max-chunks" min="0" max="2" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-b" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -567,7 +586,7 @@ appDiv.innerHTML = `
         <div class="flex-row">
           <button class="round-btn" id="loop-in-b" title="Loop IN: set chunk range start">IN</button>
           <button class="round-btn" id="loop-out-b" title="Loop OUT: set chunk range end + enable">OUT</button>
-          <button class="round-btn" id="loop-toggle-b" title="Activate/Exit loop: hide others, keep selection animating">GO</button>
+          <button class="round-btn" id="loop-toggle-b" title="Activate/Exit loop: hide others, keep selection animating" style="display:none;">GO</button>
           <button class="round-btn" id="loop-half-b">1/2</button>
           <button class="round-btn" id="loop-active-b">4B</button>
           <button class="round-btn" id="loop-double-b">2X</button>
@@ -614,10 +633,10 @@ appDiv.innerHTML = `
     </div>
 
     <div class="pads-grid" id="pads-b">
-      <button class="pad-btn" data-pad="0">FRONT</button><button class="pad-btn" data-pad="1">BACK</button>
-      <button class="pad-btn" data-pad="2">L</button><button class="pad-btn" data-pad="3">R</button>
-      <button class="pad-btn" data-pad="4">TOP</button><button class="pad-btn" data-pad="5">BOT</button>
-      <button class="pad-btn" data-pad="6">¾L</button><button class="pad-btn" data-pad="7">¾R</button>
+      <button class="pad-btn" data-pad="0">1</button><button class="pad-btn" data-pad="1">2</button>
+      <button class="pad-btn" data-pad="2">3</button><button class="pad-btn" data-pad="3">4</button>
+      <button class="pad-btn" data-pad="4">5</button><button class="pad-btn" data-pad="5">6</button>
+      <button class="pad-btn" data-pad="6">7</button><button class="pad-btn" data-pad="7">8</button>
     </div>
   </div>
 
@@ -2531,6 +2550,14 @@ function setupAutoLoop(deck) {
   const btnDouble = document.querySelector(`#loop-double-${deck}`);
   
   btnActive.addEventListener('click', () => {
+    const hasChunkRange = isA ? loopRangeSelectedA : loopRangeSelectedB;
+    const isCommitted = isA ? loopCommittedA : loopCommittedB;
+    if (hasChunkRange || isCommitted) {
+      toggleLoopCommit(deck);
+      syncDeckLeds(deck);
+      return;
+    }
+
     if (isA) {
       isAutoLoopA = !isAutoLoopA;
       if (isAutoLoopA) {
@@ -2616,11 +2643,13 @@ function setupChunkLoop(deck) {
   // Style helpers for orange highlight
   function updateInOutHighlight() {
     if (isA) {
-      btnIn.style.borderColor  = loopActiveA ? '#f97316' : '';
-      btnOut.style.borderColor = loopActiveA ? '#f97316' : '';
+      const selecting = loopRangeSelectedA && !loopCommittedA;
+      btnIn.style.borderColor  = selecting ? '#f97316' : '';
+      btnOut.style.borderColor = selecting ? '#f97316' : '';
     } else {
-      btnIn.style.borderColor  = loopActiveB ? '#f97316' : '';
-      btnOut.style.borderColor = loopActiveB ? '#f97316' : '';
+      const selecting = loopRangeSelectedB && !loopCommittedB;
+      btnIn.style.borderColor  = selecting ? '#f97316' : '';
+      btnOut.style.borderColor = selecting ? '#f97316' : '';
     }
   }
 
@@ -2637,10 +2666,12 @@ function setupChunkLoop(deck) {
     const ch = currentActiveChunk();
     if (isA) {
       loopChunkStartA = ch;
+      loopRangeSelectedA = false;
       // If end < start, push end forward to start (keeps range valid)
       if (loopChunkEndA < loopChunkStartA) loopChunkEndA = loopChunkStartA;
     } else {
       loopChunkStartB = ch;
+      loopRangeSelectedB = false;
       if (loopChunkEndB < loopChunkStartB) loopChunkEndB = loopChunkStartB;
     }
     updateInOutHighlight();
@@ -2656,12 +2687,14 @@ function setupChunkLoop(deck) {
       if (loopChunkEndA < loopChunkStartA) loopChunkEndA = loopChunkStartA;
       loopActiveA = true;
       isAutoLoopA = true;
+      loopRangeSelectedA = true;
       btnActive.classList.add('active');
     } else {
       loopChunkEndB = ch;
       if (loopChunkEndB < loopChunkStartB) loopChunkEndB = loopChunkStartB;
       loopActiveB = true;
       isAutoLoopB = true;
+      loopRangeSelectedB = true;
       btnActive.classList.add('active');
     }
     updateInOutHighlight();
@@ -2852,7 +2885,16 @@ function setPadMode(deck, mode) {
   if (deck === 'a') padModeA = mode; else padModeB = mode;
   const btn = document.getElementById(`pad-mode-${deck}`);
   if (btn) btn.textContent = PAD_MODE_LABELS[mode] || mode;
+  updatePadLabels(deck, mode);
 }
+
+function updatePadLabels(deck, mode) {
+  const labels = mode === 'beatloop' ? PAD_CAM_LABELS : PAD_NUM_LABELS;
+  document.querySelectorAll(`#pads-${deck} .pad-btn`).forEach((pad, index) => {
+    pad.textContent = labels[index] || String(index + 1);
+  });
+}
+
 function cyclePadMode(deck) {
   const cur = deck === 'a' ? padModeA : padModeB;
   const next = PAD_MODES[(PAD_MODES.indexOf(cur) + 1) % PAD_MODES.length];
@@ -2860,6 +2902,10 @@ function cyclePadMode(deck) {
 }
 document.getElementById('pad-mode-a')?.addEventListener('click', () => cyclePadMode('a'));
 document.getElementById('pad-mode-b')?.addEventListener('click', () => cyclePadMode('b'));
+updatePadLabels('a', padModeA);
+updatePadLabels('b', padModeB);
+updatePadLabels('c', 'hotcue');
+updatePadLabels('d', 'hotcue');
 window._cyclePadMode = cyclePadMode;
 
 // Router for physical (MIDI) pads — honours the current pad mode of that deck.
@@ -2879,17 +2925,39 @@ window._handleDeckPad = (deckStr, index, velocity) => {
 // animating, every other chunk on that deck scales to 0. Toggling again exits.
 function toggleLoopCommit(deck) {
   const isA = deck === 'a';
-  const hasRange = isA ? loopActiveA : loopActiveB;
+  const hasRange = isA ? loopRangeSelectedA : loopRangeSelectedB;
   const committed = isA ? loopCommittedA : loopCommittedB;
-  const btn = document.getElementById(`loop-toggle-${deck}`);
+  const btn = document.getElementById(`loop-active-${deck}`);
+  const goBtn = document.getElementById(`loop-toggle-${deck}`);
   if (!committed) {
     if (!hasRange) { if (statusEl) statusEl.textContent = 'Select a loop (IN → OUT) first.'; return; }
-    if (isA) loopCommittedA = true; else loopCommittedB = true;
+    if (isA) {
+      loopCommittedA = true;
+      loopActiveA = true;
+      isAutoLoopA = true;
+    } else {
+      loopCommittedB = true;
+      loopActiveB = true;
+      isAutoLoopB = true;
+    }
     if (btn) { btn.classList.add('active'); btn.textContent = 'EXIT'; }
+    if (goBtn) { goBtn.classList.add('active'); goBtn.textContent = 'EXIT'; }
   } else {
-    if (isA) loopCommittedA = false; else loopCommittedB = false;
-    if (btn) { btn.classList.remove('active'); btn.textContent = 'GO'; }
+    if (isA) {
+      loopCommittedA = false;
+      loopActiveA = false;
+      isAutoLoopA = false;
+      loopRangeSelectedA = false;
+    } else {
+      loopCommittedB = false;
+      loopActiveB = false;
+      isAutoLoopB = false;
+      loopRangeSelectedB = false;
+    }
+    if (btn) { btn.classList.remove('active'); btn.textContent = '4B'; }
+    if (goBtn) { goBtn.classList.remove('active'); goBtn.textContent = 'GO'; }
   }
+  syncDeckLeds(deck);
   triggerRealtimeUpdate();
 }
 document.getElementById('loop-toggle-a')?.addEventListener('click', () => toggleLoopCommit('a'));
@@ -3861,7 +3929,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneA) {
       const fxSceneA = processFx(sceneA, 'deckA');
-      const CHUNK_STEPS = [4, 8, 16];
+      const CHUNK_STEPS = [4, 8, 16, 32];
       const chunksA = sliceIntoSpheres(fxSceneA, CHUNK_STEPS[Math.round(Number(document.querySelector('#chunks-slider-a').value))] || 16);
       for (const c of chunksA) {
         const buf = convertSplatDataToBuffer(c);
@@ -3882,7 +3950,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneB) {
       const fxSceneB = processFx(sceneB, 'deckB');
-      const CHUNK_STEPS_B = [4, 8, 16];
+      const CHUNK_STEPS_B = [4, 8, 16, 32];
       const chunksB = sliceIntoSpheres(fxSceneB, CHUNK_STEPS_B[Math.round(Number(document.querySelector('#chunks-slider-b').value))] || 16);
       for (const c of chunksB) {
         const buf = convertSplatDataToBuffer(c);
@@ -3903,7 +3971,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneC) {
       const fxSceneC = processFx(sceneC, 'deckC');
-      const CHUNK_STEPS_C = [4, 8, 16];
+      const CHUNK_STEPS_C = [4, 8, 16, 32];
       const chunksC = sliceIntoSpheres(fxSceneC, CHUNK_STEPS_C[Math.round(Number(document.querySelector('#chunks-slider-c')?.value))] || 16);
       for (const c of chunksC) {
         const buf = convertSplatDataToBuffer(c);
@@ -3917,7 +3985,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneD) {
       const fxSceneD = processFx(sceneD, 'deckD');
-      const CHUNK_STEPS_D = [4, 8, 16];
+      const CHUNK_STEPS_D = [4, 8, 16, 32];
       const chunksD = sliceIntoSpheres(fxSceneD, CHUNK_STEPS_D[Math.round(Number(document.querySelector('#chunks-slider-d')?.value))] || 16);
       for (const c of chunksD) {
         const buf = convertSplatDataToBuffer(c);
@@ -4547,7 +4615,7 @@ document.addEventListener('input', (e) => {
     const deck = e.target.id.split('-').pop();
     const valEl = document.getElementById(`chunks-val-${deck}`);
     // Slider is index 0-3 → actual chunk count [4,8,16,32]
-    const CHUNK_STEPS = [4, 8, 16];
+    const CHUNK_STEPS = [4, 8, 16, 32];
     const chunkCount = CHUNK_STEPS[Math.round(parseFloat(e.target.value))] || 16;
     if (valEl) valEl.textContent = chunkCount;
     const min = parseFloat(e.target.min), max = parseFloat(e.target.max);
@@ -5395,6 +5463,7 @@ btnReset.addEventListener('click', async () => {
   loopActiveA = false; isAutoLoopA = false;
   loopActiveB = false; isAutoLoopB = false;
   loopCommittedA = false; loopCommittedB = false;
+  loopRangeSelectedA = false; loopRangeSelectedB = false;
   for (const d of ['a', 'b']) {
     const tBtn = document.getElementById(`loop-toggle-${d}`);
     if (tBtn) { tBtn.classList.remove('active'); tBtn.textContent = 'GO'; }
@@ -5522,27 +5591,6 @@ function bindDeckEvents(deckLetter) {
   const valEl = document.getElementById(`max-splats-val-${L}`);
   
   const btnLoad = document.getElementById(`btn-load-${L}`);
-  if (btnLoad) {
-    btnLoad.addEventListener('click', async (e) => {
-      const isLoaded = (L === 'a') ? sceneA : (L === 'b') ? sceneB : (L === 'c') ? sceneC : sceneD;
-      if (isLoaded) {
-        e.preventDefault();
-        if (L === 'a') { sceneA = null; rawSceneA = null; }
-        if (L === 'b') { sceneB = null; rawSceneB = null; }
-        if (L === 'c') { sceneC = null; rawSceneC = null; }
-        if (L === 'd') { sceneD = null; rawSceneD = null; }
-        if (fileNameEl) fileNameEl.textContent = 'No file';
-        btnLoad.classList.remove('loaded');
-        if (fileInput) fileInput.value = '';
-        // Fast unload: don't dispose/recreate the viewer or re-encode the other
-        // decks — the now-null scene is hidden by the per-deck loop guard. (The
-        // GPU buffers linger until the next load triggers a rebuild.)
-        statusEl.textContent = `Scene ${U} unloaded.`;
-        triggerRealtimeUpdate();
-      }
-    });
-  }
-
   if (fileInput) {
     fileInput.addEventListener('change', async (e) => {
       const file = e.target.files[0];

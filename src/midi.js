@@ -222,7 +222,7 @@ const PROFILES = {
         if (note === 17) clickButton(`loop-out-${deckStr}`, velocity);  // ⚠VERIFY
 
         // Reloop/Exit → activate/exit the selected chunk loop (commit toggle).
-        if (note === 77) clickButton(`loop-toggle-${deckStr}`, velocity); // RELOOP/EXIT ⚠VERIFY
+        if (note === 77) clickButton(`loop-active-${deckStr}`, velocity); // RELOOP/EXIT ⚠VERIFY
         if (note === 81) clickButton(`loop-half-${deckStr}`, velocity);   // ½          ⚠VERIFY
         if (note === 83) clickButton(`loop-double-${deckStr}`, velocity); // ×2         ⚠VERIFY
 
