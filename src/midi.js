@@ -154,6 +154,11 @@ function spinJog(elementId, midiValue, scale = 0.03) {
  * clicking the DOM pad). Falls back to the DOM pad if the hook isn't present.
  */
 function triggerPad(deckStr, padIndex, velocity) {
+  // Pad-mode aware router (Hot Cue → loops, Beat Loop → camera, etc.).
+  if (typeof window !== 'undefined' && typeof window._handleDeckPad === 'function') {
+    window._handleDeckPad(deckStr, padIndex, velocity);
+    return;
+  }
   if (typeof window !== 'undefined' && typeof window._setDeckLoop === 'function') {
     window._setDeckLoop(deckStr, padIndex, velocity > 0);
     return;
@@ -195,101 +200,102 @@ const PROFILES = {
   // Source: mixxxdj/mixxx Pioneer-DDJ-400.midi.xml
   //         (official Pioneer DDJ-400 MIDI Message List E1)
   //         https://www.pioneerdj.com/-/media/pioneerdj/software-info/controller/ddj-400/ddj-400_midi_message_list_e1.pdf
+  // The DDJ-400 and DDJ-FLX4 share nearly all note/CC numbers (Pioneer reused the
+  // DDJ-400 message map for the FLX4). This profile therefore mirrors the FLX4
+  // mapping, which was CONFIRMED via in-app guided capture. Items the DDJ-400 may
+  // differ on (or that were never hardware-verified on a 400) are tagged
+  // ⚠VERIFY — re-capture them with GUIDED MAP / MIDI Learn if they misbehave.
   'ddj-400': {
     handleNoteOn(channel, note, velocity) {
-      const isDeckA = (channel === 0);
-      const isDeckB = (channel === 1);
-      const isDeck  = isDeckA || isDeckB;
-      const deckStr = isDeckA ? 'a' : 'b';
+      // ── Deck transport / loops (ch0 = Deck A, ch1 = Deck B) ──
+      if (channel === 0 || channel === 1) {
+        const deckStr = channel === 0 ? 'a' : 'b';
 
-      if (isDeck) {
-        // Play/Pause  — Note 11 (0x0B)
-        if (note === 11) clickButton(`btn-play-${deckStr}`, velocity);
+        if (note === 11) clickButton(`btn-play-${deckStr}`, velocity); // Play/Pause 0x0B
+        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);  // Cue 0x0C → Stop
 
-        // Cue — Note 12 (0x0C) → performs Stop in the app
-        if (note === 12) clickButton(`btn-cue-${deckStr}`, velocity);
-
-        // Shift button — Note 63 (0x3F): cycle tempo range on press
+        // Shift (0x3F) → cycle tempo range on press
         if (note === 63 && velocity > 0) { if (window._cycleTempoRange) window._cycleTempoRange(deckStr); }
 
-        // Hot Cue pads — Notes 0-7 (0x00-0x07)
-        if (note >= 0 && note <= 7) {
-          triggerPad(deckStr, note, velocity);
+        // Loop section — manual IN/OUT (DDJ-400: LOOP IN 0x10, LOOP OUT 0x11)
+        if (note === 16) clickButton(`loop-in-${deckStr}`, velocity);   // ⚠VERIFY
+        if (note === 17) clickButton(`loop-out-${deckStr}`, velocity);  // ⚠VERIFY
+
+        // Reloop/Exit → activate/exit the selected chunk loop (commit toggle).
+        if (note === 77) clickButton(`loop-toggle-${deckStr}`, velocity); // RELOOP/EXIT ⚠VERIFY
+        if (note === 81) clickButton(`loop-half-${deckStr}`, velocity);   // ½          ⚠VERIFY
+        if (note === 83) clickButton(`loop-double-${deckStr}`, velocity); // ×2         ⚠VERIFY
+
+        // Load — ⚠️ a file dialog cannot be opened from a MIDI event (browsers
+        // require a real user gesture). Use the on-screen LOAD button.
+        if (note === 70 || note === 71) console.warn('[MIDI] Load via MIDI not possible (file dialog needs a user gesture); use the on-screen LOAD button.');
+      }
+
+      // ── Performance pads (ch7 = Deck A, ch9 = Deck B; Hot Cue notes 0-7) ──
+      // DDJ-400 pads emit different notes per pad mode; this targets Hot Cue mode.
+      // Re-capture with GUIDED MAP if you map a different pad mode.        ⚠VERIFY
+      if (channel === 7 && note >= 0 && note <= 7) triggerPad('a', note, velocity);
+      if (channel === 9 && note >= 0 && note <= 7) triggerPad('b', note, velocity);
+
+      // ── Beat FX section (ch4) ──
+      if (channel === 4) {
+        // CH-select switch → which deck the FX section drives.
+        // DDJ-400 Beat-FX "CH SELECT" is a 3-position selector: 1 → Deck A,
+        // 2 → Deck B, MASTER → master bus. Notes per Pioneer/Mixxx map. ⚠VERIFY
+        if (velocity > 0) {
+          if (note === 16 || note === 0)  ddj400FxTarget = 'a'; // CH 1
+          if (note === 17 || note === 1)  ddj400FxTarget = 'b'; // CH 2
+          if (note === 18 || note === 2)  ddj400FxTarget = 'm'; // MASTER
         }
 
-        // Loop controls — TODO verify exact notes on DDJ-400
-        if (note === 20) clickButton(`loop-active-${deckStr}`, velocity); // 4-beat loop toggle // TODO verify
-        if (note === 21) clickButton(`loop-half-${deckStr}`, velocity);   // loop half          // TODO verify
-        if (note === 22) clickButton(`loop-double-${deckStr}`, velocity); // loop double        // TODO verify
-
-        // Load track — Deck A: Note 70 (0x46), Deck B: Note 71 (0x47)
-        // ⚠️ Cannot open a file dialog from a MIDI event — browsers require a
-        // real user gesture (click). Calling fileInput.click() silently fails.
-        // Use the on-screen LOAD button instead; MIDI Learn will confirm the note.
-        if (isDeckA && note === 70) console.warn('[MIDI] Load Deck A triggered via MIDI — file dialog cannot be opened from MIDI event; use on-screen button.');
-        if (isDeckB && note === 71) console.warn('[MIDI] Load Deck B triggered via MIDI — file dialog cannot be opened from MIDI event; use on-screen button.');
+        if (note === 71) clickButton(`btn-fx-toggle-${ddj400FxTarget}`, velocity);  // ON/OFF
+        if (note === 99 && velocity > 0) cycleSelect(`fx-select-${ddj400FxTarget}`); // FX SELECT ⚠VERIFY
+        if (note === 74 && velocity > 0) clickButton(`btn-beat-prev-${ddj400FxTarget}`, velocity); // Beat ‹ ⚠VERIFY
+        if (note === 75 && velocity > 0) clickButton(`btn-beat-next-${ddj400FxTarget}`, velocity); // Beat › ⚠VERIFY
       }
 
-      // Beat FX channel (ch 4)
-      if (channel === 4) {
-        // Beat FX On/Off — Note 71 (0x47) // TODO verify
-        if (note === 71) clickButton('btn-fx-toggle-a', velocity);
-      }
-
-      // Master section (ch 6)
+      // ── Master section (ch6) ──
       if (channel === 6) {
-        if (note === 84) clickButton('btn-strobe', velocity); // Master Cue → strobe toggle
+        // Master Cue → RESET VIEW (re-centers all deck cameras + zoom).
+        if (note === 84) clickButton('btn-reset-orient', velocity);
       }
     },
 
     handleCC(channel, cc, value) {
-      const isDeckA = (channel === 0);
-      const isDeckB = (channel === 1);
-      const isDeck  = isDeckA || isDeckB;
-      const deckStr = isDeckA ? 'a' : 'b';
+      // ── Deck controls (ch0 = A, ch1 = B) ──
+      if (channel === 0 || channel === 1) {
+        const deckStr = channel === 0 ? 'a' : 'b';
 
-      if (isDeck) {
-        // Jog wheel vinyl turn — CC 34 (0x22)
-        if (cc === 34) spinJog(`jog-${deckStr}`, value);
-
-        // Tempo fader MSB — CC 0 (0x00)
-        if (cc === 0)  mapSlider(`tempo-${deckStr}`, value);
-        // Tempo fader LSB — CC 32 (0x20) — fine resolution, skip
-
-        // EQ High — CC 39 (0x27)
-        if (cc === 39) mapSlider(`eq-hi-${deckStr}`, value);
-        // EQ Mid  — CC 43 (0x2B)
-        if (cc === 43) mapSlider(`eq-mid-${deckStr}`, value);
-        // EQ Low  — CC 47 (0x2F)
-        if (cc === 47) mapSlider(`eq-low-${deckStr}`, value);
-
-        // Trim/Gain — CC 36 (0x24) → now controls chunk count
-        if (cc === 36) mapSlider(`chunks-slider-${deckStr}`, value);
-
-        // Channel Fader (Vol) — CC 51 (0x33)
-        if (cc === 51) mapSlider(`vol-${deckStr}`, value);
-
-        // Filter — DDJ-400 may send on ch0/ch1 CC 22; TODO verify
-        if (cc === 22) mapSlider(`filter-${deckStr}`, value); // TODO verify CC
+        if (cc === 34) spinJog(`jog-${deckStr}`, value);       // jog top plate = scratch (0x22)
+        if (cc === 35) {                                        // jog ring = XZ translation nudge (0x21)
+          const ndelta = (value < 64 ? value : -(128 - value));
+          const jogEl = document.getElementById(`jog-${deckStr}`);
+          if (jogEl) jogEl.dispatchEvent(new CustomEvent('jognudge', { detail: { delta: ndelta * 0.003 } }));
+        }
+        // Tempo fader MSB (LSB 0x20 ignored). Inverted (127-value) so pushing the
+        // physical fader DOWN raises BPM and UP lowers it, per house convention.
+        if (cc === 0)  mapSlider(`tempo-${deckStr}`, 127 - value);
+        if (cc === 39) mapSlider(`eq-hi-${deckStr}`, value);   // EQ High  0x27
+        if (cc === 43) mapSlider(`eq-mid-${deckStr}`, value);  // EQ Mid   0x2B
+        if (cc === 47) mapSlider(`eq-low-${deckStr}`, value);  // EQ Low   0x2F
+        if (cc === 36) mapSlider(`chunks-slider-${deckStr}`, value); // Trim/Gain → chunk count 0x24
+        if (cc === 51) mapSlider(`vol-${deckStr}`, value);     // Channel fader 0x33
       }
 
-      // Mixer channel (ch 6)
+      // ── Mixer / master section (ch6) ──
       if (channel === 6) {
-        // Crossfader — CC 31 (0x1F)
-        if (cc === 31) mapSlider('crossfader', value);
-
-        // Filter (Quick Filter) — ch6 CC 23 (deck A) / 24 (deck B)
-        if (cc === 23) mapSlider('filter-a', value);
-        if (cc === 24) mapSlider('filter-b', value);
-
-        // Master volume — CC 5 on ch6 // TODO verify CC
-        if (cc === 5) mapSlider('master-vol', value); // TODO verify CC
+        if (cc === 31) mapSlider('crossfader', value);         // Crossfader 0x1F
+        if (cc === 23) mapSlider('filter-a', value);           // Color/Quick filter A
+        if (cc === 24) mapSlider('filter-b', value);           // Color/Quick filter B
+        if (cc === 8)  mapSlider('master-vol', value);         // Master level → zoom        ⚠VERIFY
+        if (cc === 12) mapSlider('knob-dof', value);           // Headphone MIX → DOF         ⚠VERIFY
+        if (cc === 13) mapSlider('knob-lensflare', value);     // Headphone LEVEL → Flare     ⚠VERIFY
+        if (cc === 5)  runAction('strobe-3state', value, false); // Mic level → strobe 3-state ⚠VERIFY
       }
 
-      // Beat FX channel (ch 4)
+      // ── Beat FX depth (ch4 CC2) → current target deck's FX depth ──
       if (channel === 4) {
-        // Beat FX Depth/Level — CC 2 (0x02)
-        if (cc === 2) mapSlider('fx-depth-a', value);
+        if (cc === 2) mapSlider(`fx-depth-${ddj400FxTarget}`, value);
       }
     },
   },
@@ -408,6 +414,9 @@ const PROFILES = {
 // Tracks which deck the FLX4 Beat FX section is currently controlling.
 // Changed by the CH-select buttons (1 → 'a', 2 → 'b', MST → 'm').
 let flx4FxTarget = 'a';
+
+// Same idea for the DDJ-400 Beat FX section (CH-select → which deck FX controls).
+let ddj400FxTarget = 'a';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // GENERIC MAPPING ENGINE
@@ -828,17 +837,166 @@ function getMIDIMessage(message) {
 
 // ── MIDI access ───────────────────────────────────────────────────────────────
 
+/**
+ * Guess the matching built-in profile from a MIDI input's device name.
+ * Returns a profile key ('ddj-400' | 'ddj-flx4') or null if unrecognized.
+ * FLX4 is checked first so "DDJ-FLX4" never matches the looser "400" test.
+ */
+function profileFromDeviceName(name) {
+  if (!name) return null;
+  const n = name.toUpperCase();
+  if (n.includes('FLX4') || n.includes('FLX-4')) return 'ddj-flx4';
+  if (n.includes('DDJ-400') || n.includes('DDJ400') || n.includes('400')) return 'ddj-400';
+  return null;
+}
+
+// Auto-detect runs only until the user manually picks a profile, so we never
+// clobber a deliberate choice when a device re-announces itself.
+let _autoDetectLocked = false;
+
+/** Called by the UI when the user manually changes the profile dropdown. */
+export function lockAutoDetect() {
+  _autoDetectLocked = true;
+}
+
+/** Try to auto-select a built-in profile from a device name. */
+function tryAutoDetect(deviceName) {
+  if (_autoDetectLocked) return;
+  const guess = profileFromDeviceName(deviceName);
+  if (!guess) return;
+  setMidiProfile(guess);
+  console.log(`[MIDI] Auto-detected "${deviceName}" → profile "${guess}"`);
+  // Let the UI sync the dropdown to match.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('midi-profile-autodetected', { detail: { profile: guess } }));
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MIDI OUTPUT  →  CONTROLLER LED FEEDBACK
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Pioneer DDJ LEDs are lit by sending the controller a Note On whose channel +
+// note match the *button's own* input message. velocity 0x7F = lit, 0x00 = off.
+// We mirror app state back to the hardware so the operator can see, on the deck,
+// what is playing / looping / cued without looking at the screen.
+//
+// LED note numbers below mirror the DDJ-400 input map in PROFILES['ddj-400'].
+// Anything the 400 input map tags ⚠VERIFY is equally unverified for output —
+// if an LED doesn't light, confirm the note with MIDI Learn and update here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _midiOutputs = [];     // all connected MIDI output ports
+const LED_ON = 0x7f;
+const LED_OFF = 0x00;
+
+// Deck → base MIDI channel for transport/loop buttons (a=0, b=1).
+function _deckChannel(deck) { return deck === 'b' ? 1 : 0; }
+// Deck → performance-pad channel (a=7, b=9), matching the input map.
+function _padChannel(deck) { return deck === 'b' ? 9 : 7; }
+
+// Named transport/loop LEDs → note number on the deck channel.
+const LED_NOTES = {
+  'play':        11, // 0x0B
+  'cue':         12, // 0x0C
+  'loop-in':     16, // ⚠VERIFY
+  'loop-out':    17, // ⚠VERIFY
+  'loop-active': 77, // ⚠VERIFY
+  'loop-half':   81, // ⚠VERIFY
+  'loop-double': 83, // ⚠VERIFY
+};
+
+/** Refresh the cached list of output ports from a MIDIAccess object. */
+function _collectOutputs(midiAccess) {
+  _midiOutputs = [...midiAccess.outputs.values()];
+  for (const o of _midiOutputs) console.log(`[MIDI] Output port: ${o.name}`);
+}
+
+/** Low-level: send a 3-byte message to every output port. Safe if none exist. */
+function _sendOut(bytes) {
+  if (!_midiOutputs.length) return;
+  for (const out of _midiOutputs) {
+    try { out.send(bytes); } catch (e) { /* port busy / closed — ignore */ }
+  }
+}
+
+/** Send a Note On to set one LED on/off. */
+function _led(channel, note, on) {
+  _sendOut([0x90 | (channel & 0x0f), note & 0x7f, on ? LED_ON : LED_OFF]);
+}
+
+/**
+ * Set a named transport/loop LED for a deck.
+ * @param {'a'|'b'} deck
+ * @param {string}  control  key in LED_NOTES (e.g. 'play', 'loop-active')
+ * @param {boolean} on
+ */
+export function setLed(deck, control, on) {
+  const note = LED_NOTES[control];
+  if (note === undefined) return;
+  _led(_deckChannel(deck), note, on);
+}
+
+/** Set a performance-pad LED (index 0-7) for a deck. */
+export function setPadLed(deck, index, on) {
+  if (index < 0 || index > 7) return;
+  _led(_padChannel(deck), index, on);
+}
+
+/** Briefly flash a named LED (used for momentary buttons like Cue). */
+export function flashLed(deck, control, ms = 150) {
+  setLed(deck, control, true);
+  setTimeout(() => setLed(deck, control, false), ms);
+}
+
+/** Turn every LED this module knows about off (both decks + all pads). */
+export function allLedsOff() {
+  for (const deck of ['a', 'b']) {
+    for (const control of Object.keys(LED_NOTES)) setLed(deck, control, false);
+    for (let i = 0; i < 8; i++) setPadLed(deck, i, false);
+  }
+}
+
+/**
+ * Quick "lamp test" so the user sees feedback is live: blink play + all pads,
+ * then clear. Called once when a DDJ output is detected.
+ */
+function _lampTest() {
+  for (const deck of ['a', 'b']) {
+    setLed(deck, 'play', true);
+    for (let i = 0; i < 8; i++) setPadLed(deck, i, true);
+  }
+  setTimeout(allLedsOff, 250);
+}
+
 function onMIDISuccess(midiAccess) {
   console.log('[MIDI] Access successful');
   for (let input of midiAccess.inputs.values()) {
     console.log(`[MIDI] Connected: ${input.name}`);
     input.onmidimessage = getMIDIMessage;
+    tryAutoDetect(input.name);
+  }
+
+  _collectOutputs(midiAccess);
+  if (_midiOutputs.length) {
+    _lampTest();
+    // Ask the app to push current state to the freshly-found LEDs.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('midi-leds-ready'));
   }
 
   midiAccess.onstatechange = (e) => {
     console.log(`[MIDI] State change: ${e.port.name} → ${e.port.state}`);
     if (e.port.state === 'connected' && e.port.type === 'input') {
       e.port.onmidimessage = getMIDIMessage;
+      tryAutoDetect(e.port.name);
+    }
+    // Rebuild the output list on any output connect/disconnect.
+    if (e.port.type === 'output') {
+      _collectOutputs(midiAccess);
+      if (e.port.state === 'connected' && _midiOutputs.length) {
+        _lampTest();
+        if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('midi-leds-ready'));
+      }
     }
   };
 }

@@ -6,7 +6,7 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
-import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride } from './midi.js';
+import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
 window._simulateMidi = _simulateMIDIMessage;
 // Test hooks for the built-in override layer.
@@ -185,6 +185,19 @@ let loopChunkStartA = 0;
 let loopChunkEndA = 0;
 let loopChunkStartB = 0;
 let loopChunkEndB = 0;
+
+// Loop "commit" state (#6): after a range is selected (orange), the activate/exit
+// button commits it — orange disappears, the selected chunks keep animating, and
+// every other chunk on that deck scales to 0.
+let loopCommittedA = false;
+let loopCommittedB = false;
+
+// Pad mode (#2): 'hotcue' (pads → loops), 'beatloop' (pads → camera presets),
+// 'beatjump' / 'sampler' reserved for later (no-op for now).
+let padModeA = 'hotcue';
+let padModeB = 'hotcue';
+const PAD_MODES = ['hotcue', 'beatloop', 'beatjump', 'sampler'];
+const PAD_MODE_LABELS = { hotcue: 'HOT CUE', beatloop: 'BEAT LOOP', beatjump: 'BEAT JUMP', sampler: 'SAMPLER' };
 
 let loopActiveB = false;
 let loopStartB = 0;
@@ -463,7 +476,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-a">16</span></span>
-            <input type="range" id="chunks-slider-a" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-a" class="max-chunks" min="0" max="2" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -475,6 +488,7 @@ appDiv.innerHTML = `
         <div class="flex-row">
           <button class="round-btn" id="loop-in-a" title="Loop IN: set chunk range start">IN</button>
           <button class="round-btn" id="loop-out-a" title="Loop OUT: set chunk range end + enable">OUT</button>
+          <button class="round-btn" id="loop-toggle-a" title="Activate/Exit loop: hide others, keep selection animating">GO</button>
           <button class="round-btn" id="loop-half-a">1/2</button>
           <button class="round-btn" id="loop-active-a">4B</button>
           <button class="round-btn" id="loop-double-a">2X</button>
@@ -515,6 +529,7 @@ appDiv.innerHTML = `
     </div>
 
     <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
+      <button class="round-btn" id="pad-mode-a" title="Pad mode: Hot Cue / Beat Loop (camera) / Beat Jump / Sampler" style="font-size:8px; line-height:1.1; min-width:46px;">HOT CUE</button>
       <button class="huge-round-btn cue" id="btn-cue-a">C</button>
       <button class="huge-round-btn stop" id="btn-stop-a" style="background:#444; font-size:16px;">⏹</button>
       <button class="huge-round-btn play" id="btn-play-a">▶</button>
@@ -541,7 +556,7 @@ appDiv.innerHTML = `
           </div>
           <div class="flex-row" style="gap:4px; align-items:center;">
             <span style="font-size:9px; font-weight:bold; color:#888;">CHK: <span id="chunks-val-b">16</span></span>
-            <input type="range" id="chunks-slider-b" class="max-chunks" min="0" max="3" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
+            <input type="range" id="chunks-slider-b" class="max-chunks" min="0" max="2" step="1" value="2" style="width:60px; height:6px; cursor:pointer; -webkit-appearance:none; background:#444; border-radius:3px;">
           </div>
         </div>
       </div>
@@ -553,6 +568,7 @@ appDiv.innerHTML = `
         <div class="flex-row">
           <button class="round-btn" id="loop-in-b" title="Loop IN: set chunk range start">IN</button>
           <button class="round-btn" id="loop-out-b" title="Loop OUT: set chunk range end + enable">OUT</button>
+          <button class="round-btn" id="loop-toggle-b" title="Activate/Exit loop: hide others, keep selection animating">GO</button>
           <button class="round-btn" id="loop-half-b">1/2</button>
           <button class="round-btn" id="loop-active-b">4B</button>
           <button class="round-btn" id="loop-double-b">2X</button>
@@ -593,6 +609,7 @@ appDiv.innerHTML = `
     </div>
 
     <div class="flex-between" style="margin-bottom:8px; padding: 0 16px; gap: 8px;">
+      <button class="round-btn" id="pad-mode-b" title="Pad mode: Hot Cue / Beat Loop (camera) / Beat Jump / Sampler" style="font-size:8px; line-height:1.1; min-width:46px;">HOT CUE</button>
       <button class="huge-round-btn cue" id="btn-cue-b">C</button>
       <button class="huge-round-btn stop" id="btn-stop-b" style="background:#444; font-size:16px;">⏹</button>
       <button class="huge-round-btn play" id="btn-play-b">▶</button>
@@ -958,6 +975,37 @@ const beatValueMEl = document.querySelector('#beat-value-m');
 // Cached hot-loop element references (avoid per-frame DOM queries)
 const volAEl = document.querySelector('#vol-a');
 const volBEl = document.querySelector('#vol-b');
+// Smoothed deck-volume scale (eased each frame) — kills the MIDI fader jitter that
+// otherwise makes the whole deck visibly snap when the channel fader is nudged.
+let volScaleSmoothA = 0.8;
+let volScaleSmoothB = 1.0;
+const VOL_SMOOTH_ALPHA = 0.15;
+
+// Virtual jog-wheel spin: the inner disc rotates continuously while a deck plays
+// (scaled by BPM) to simulate a spinning record. Independent of the outer drag
+// transform set by setupJogWheel, so scratching still works on top.
+const jogInnerA = document.querySelector('#jog-a .jog-inner');
+const jogInnerB = document.querySelector('#jog-b .jog-inner');
+let jogVisAngleA = 0;
+let jogVisAngleB = 0;
+
+// ── Live EQ (no geometry reload) ───────────────────────────────────────────────
+// Chunks come back from sliceIntoSpheres sorted outer→inner, so a chunk's index
+// fraction maps to a radial band: outer = HI, middle = MID, inner = LOW. The knob
+// value /50 gives 0 (cut to nothing) … 1 (neutral) … 2 (boost). Turning a band to
+// 0 scales those chunks to zero — live, per-frame, no rebuild.
+const eqHiAEl = document.querySelector('#eq-hi-a');
+const eqMidAEl = document.querySelector('#eq-mid-a');
+const eqLowAEl = document.querySelector('#eq-low-a');
+const eqHiBEl = document.querySelector('#eq-hi-b');
+const eqMidBEl = document.querySelector('#eq-mid-b');
+const eqLowBEl = document.querySelector('#eq-low-b');
+function eqFactorForChunk(i, n, hiEl, midEl, lowEl) {
+  if (n <= 1) return midEl ? Number(midEl.value) / 50 : 1.0;
+  const f = i / (n - 1); // 0 = outermost chunk, 1 = innermost
+  const el = f < 0.34 ? hiEl : (f < 0.67 ? midEl : lowEl);
+  return el ? Number(el.value) / 50 : 1.0;
+}
 const tempoCEl = document.querySelector('#tempo-c');
 const tempoDEl = document.querySelector('#tempo-d');
 
@@ -1285,14 +1333,14 @@ allKnobs.forEach(knob => {
 // Attach change event listeners to mixer knobs to trigger full buffer rebuilds
 const mixerKnobs = document.querySelectorAll('.ch-trim, .ch-filter, .ch-eq-hi, .ch-eq-mid, .ch-eq-low');
 mixerKnobs.forEach(knob => {
-  knob.addEventListener('change', async () => {
-    await rebuildViewerBuffers();
-  });
-  knob.addEventListener('dblclick', async () => {
+  // EQ + filter are now applied LIVE per-frame (no geometry reload). A light
+  // realtime update is enough; we no longer rebuild buffers on these knobs.
+  knob.addEventListener('input', () => { triggerRealtimeUpdate(); });
+  knob.addEventListener('change', () => { triggerRealtimeUpdate(); });
+  knob.addEventListener('dblclick', () => {
     knob.value = knob.defaultValue;
     updateKnobFill(knob);
     triggerRealtimeUpdate();
-    await rebuildViewerBuffers();
   });
   knob.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -1676,7 +1724,38 @@ function populateMidiDeviceDropdown(selectValue) {
 window._populateMidiDeviceDropdown = populateMidiDeviceDropdown;
 
 document.getElementById('midi-device')?.addEventListener('change', (e) => {
+  lockAutoDetect(); // user made a deliberate choice — stop auto-detect from overriding it
   setMidiProfile(e.target.value);
+});
+
+// Auto-detect: when midi.js recognizes a plugged-in controller, sync the dropdown.
+window.addEventListener('midi-profile-autodetected', (e) => {
+  const profile = e.detail?.profile;
+  const sel = document.getElementById('midi-device');
+  if (sel && profile && [...sel.options].some(o => o.value === profile)) {
+    sel.value = profile;
+  }
+});
+
+// ── Controller LED feedback ───────────────────────────────────────────────────
+// Mirror deck state to the DDJ LEDs so the operator can see what's playing /
+// looping on the hardware. Called from the relevant state-change handlers and
+// once when a controller's output port appears (midi-leds-ready).
+function syncDeckLeds(deck) {
+  const isA = deck === 'a';
+  const playing = isA ? isPlayingA : isPlayingB;
+  const looping = isA ? loopActiveA : loopActiveB;
+  setLed(deck, 'play', playing);
+  setLed(deck, 'loop-active', looping);
+  setLed(deck, 'loop-in', looping);
+  setLed(deck, 'loop-out', looping);
+}
+window._syncDeckLeds = syncDeckLeds;
+
+// Push full current state to LEDs whenever a controller (re)connects.
+window.addEventListener('midi-leds-ready', () => {
+  syncDeckLeds('a');
+  syncDeckLeds('b');
 });
 
 // Build the dropdown now that any persisted custom profiles are available.
@@ -2479,6 +2558,7 @@ function setupAutoLoop(deck) {
         btnActive.classList.remove('active');
       }
     }
+    syncDeckLeds(deck);
   });
 
   btnHalf.addEventListener('click', () => {
@@ -2548,8 +2628,16 @@ function setupChunkLoop(deck) {
     }
   }
 
+  // Exit a committed loop (re-show all chunks) and reset the GO/EXIT button.
+  function clearLoopCommit() {
+    if (isA) loopCommittedA = false; else loopCommittedB = false;
+    const tBtn = document.getElementById(`loop-toggle-${deck}`);
+    if (tBtn) { tBtn.classList.remove('active'); tBtn.textContent = 'GO'; }
+  }
+
   // LOOP IN — capture current chunk as start, highlight
   btnIn.addEventListener('click', () => {
+    clearLoopCommit(); // starting a new selection exits any committed loop
     const ch = currentActiveChunk();
     if (isA) {
       loopChunkStartA = ch;
@@ -2581,6 +2669,7 @@ function setupChunkLoop(deck) {
       btnActive.classList.add('active');
     }
     updateInOutHighlight();
+    syncDeckLeds(deck);
     triggerRealtimeUpdate();
   });
 
@@ -2622,6 +2711,8 @@ function setupChunkLoop(deck) {
   // When #loop-active-a/b is clicked and loop is turned off, clear orange highlight
   btnActive.addEventListener('click', () => {
     updateInOutHighlight();
+    const stillActive = isA ? loopActiveA : loopActiveB;
+    if (!stillActive) clearLoopCommit(); // loop off → exit committed view
   });
 }
 
@@ -2640,6 +2731,7 @@ btnPlayA.addEventListener('click', () => {
     btnPlayA.classList.remove('active');
     stopAnimationLoop();
   }
+  setLed('a', 'play', isPlayingA);
   triggerRealtimeUpdate();
 });
 
@@ -2652,6 +2744,7 @@ btnPlayB.addEventListener('click', () => {
     btnPlayB.classList.remove('active');
     stopAnimationLoop();
   }
+  setLed('b', 'play', isPlayingB);
   triggerRealtimeUpdate();
 });
 
@@ -2662,6 +2755,8 @@ btnCueA.addEventListener('click', () => {
   jogAngleA = 0;
   currentScalesA.fill(0);
   stopAnimationLoop();
+  setLed('a', 'play', false);
+  flashLed('a', 'cue');
   triggerRealtimeUpdate();
   btnCueA.classList.add('active');
   setTimeout(() => btnCueA.classList.remove('active'), 200);
@@ -2674,6 +2769,7 @@ btnStopA.addEventListener('click', () => {
   jogAngleA = 0;
   currentScalesA.fill(0);
   stopAnimationLoop();
+  setLed('a', 'play', false);
   triggerRealtimeUpdate();
   btnStopA.classList.add('active');
   setTimeout(() => btnStopA.classList.remove('active'), 200);
@@ -2686,6 +2782,8 @@ btnCueB.addEventListener('click', () => {
   jogAngleB = 0;
   currentScalesB.fill(0);
   stopAnimationLoop();
+  setLed('b', 'play', false);
+  flashLed('b', 'cue');
   triggerRealtimeUpdate();
   btnCueB.classList.add('active');
   setTimeout(() => btnCueB.classList.remove('active'), 200);
@@ -2698,6 +2796,7 @@ btnStopB.addEventListener('click', () => {
   jogAngleB = 0;
   currentScalesB.fill(0);
   stopAnimationLoop();
+  setLed('b', 'play', false);
   triggerRealtimeUpdate();
   btnStopB.classList.add('active');
   setTimeout(() => btnStopB.classList.remove('active'), 200);
@@ -2745,6 +2844,9 @@ window._setDeckLoop = (deckStr, index, down) => {
   const isDeckA = (deckStr === 'a');
   if (down) setDeckLoopDown(isDeckA, index);
   else setDeckLoopUp(isDeckA);
+  // LED feedback: light the held pad, and reflect the resulting loop state.
+  setPadLed(deckStr, index, down);
+  syncDeckLeds(deckStr);
 };
 
 // On-screen pads now set the deck's camera VIEWPOINT preset (the rig eases to it).
@@ -2770,6 +2872,57 @@ setupPads('pads-a', 'a');
 setupPads('pads-b', 'b');
 setupPads('pads-c', 'c');
 setupPads('pads-d', 'd');
+
+// ── Pad mode toggle (#2) ───────────────────────────────────────────────────────
+// Cycles Hot Cue → Beat Loop → Beat Jump → Sampler. Hot Cue keeps the existing
+// loop behaviour; Beat Loop routes the physical pads to camera presets; Beat Jump
+// and Sampler are reserved (no-op for now).
+function setPadMode(deck, mode) {
+  if (deck === 'a') padModeA = mode; else padModeB = mode;
+  const btn = document.getElementById(`pad-mode-${deck}`);
+  if (btn) btn.textContent = PAD_MODE_LABELS[mode] || mode;
+}
+function cyclePadMode(deck) {
+  const cur = deck === 'a' ? padModeA : padModeB;
+  const next = PAD_MODES[(PAD_MODES.indexOf(cur) + 1) % PAD_MODES.length];
+  setPadMode(deck, next);
+}
+document.getElementById('pad-mode-a')?.addEventListener('click', () => cyclePadMode('a'));
+document.getElementById('pad-mode-b')?.addEventListener('click', () => cyclePadMode('b'));
+window._cyclePadMode = cyclePadMode;
+
+// Router for physical (MIDI) pads — honours the current pad mode of that deck.
+window._handleDeckPad = (deckStr, index, velocity) => {
+  const mode = deckStr === 'a' ? padModeA : padModeB;
+  if (mode === 'hotcue') {
+    window._setDeckLoop(deckStr, index, velocity > 0);
+  } else if (mode === 'beatloop') {
+    if (velocity > 0) setDeckCamPreset(deckStr, index); // pads → camera viewpoints
+  }
+  // beatjump / sampler: reserved — intentionally no-op for now.
+  setPadLed(deckStr, index, velocity > 0);
+};
+
+// ── Loop activate/exit toggle (#6/#7) ──────────────────────────────────────────
+// Commits the selected chunk range: orange tint clears, the selected chunks keep
+// animating, every other chunk on that deck scales to 0. Toggling again exits.
+function toggleLoopCommit(deck) {
+  const isA = deck === 'a';
+  const hasRange = isA ? loopActiveA : loopActiveB;
+  const committed = isA ? loopCommittedA : loopCommittedB;
+  const btn = document.getElementById(`loop-toggle-${deck}`);
+  if (!committed) {
+    if (!hasRange) { if (statusEl) statusEl.textContent = 'Select a loop (IN → OUT) first.'; return; }
+    if (isA) loopCommittedA = true; else loopCommittedB = true;
+    if (btn) { btn.classList.add('active'); btn.textContent = 'EXIT'; }
+  } else {
+    if (isA) loopCommittedA = false; else loopCommittedB = false;
+    if (btn) { btn.classList.remove('active'); btn.textContent = 'GO'; }
+  }
+  triggerRealtimeUpdate();
+}
+document.getElementById('loop-toggle-a')?.addEventListener('click', () => toggleLoopCommit('a'));
+document.getElementById('loop-toggle-b')?.addEventListener('click', () => toggleLoopCommit('b'));
 
 // ── Drag-to-spin Jog Wheels ────────────────────────────
 function setupJogWheel(jogEl, onSpin, onRelease) {
@@ -2981,6 +3134,16 @@ function startAnimationLoop() {
       playAngleB += speedB;
       needsUpdate = true;
     }
+
+    // Spin the virtual jog discs to simulate a turning platter (BPM-scaled).
+    if (isPlayingA && jogInnerA) {
+      jogVisAngleA += 0.06 * (bpmA / 120.0);
+      jogInnerA.style.transform = `rotate(${jogVisAngleA}rad)`;
+    }
+    if (isPlayingB && jogInnerB) {
+      jogVisAngleB += 0.06 * (bpmB / 120.0);
+      jogInnerB.style.transform = `rotate(${jogVisAngleB}rad)`;
+    }
     
     // Decay pad splash flash
     if (splashFactor > 1.0) {
@@ -3118,8 +3281,11 @@ function centerCamera() {
   
   const fov = viewer.camera.fov || 65;
   const targetDist = 5.0;
-  // 1.5x larger framing: persistent framing distance for load, play, and stop alike
-  const distance = ((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 3.0;
+  // 1.5x larger framing: persistent framing distance for load, play, and stop alike.
+  // DEFAULT_ZOOM_OUT pushes the baseline framing 30% further (object ~30% smaller)
+  // so first-load / reset / min-master-volume all sit more zoomed-out than before.
+  const DEFAULT_ZOOM_OUT = 1.3;
+  const distance = (((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 3.0) * DEFAULT_ZOOM_OUT;
   baseFramedDistance = distance;
 
   // Preserve the user's current Master-Volume zoom across reframes (FX apply,
@@ -3724,7 +3890,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneA) {
       const fxSceneA = processFx(sceneA, 'deckA');
-      const CHUNK_STEPS = [4, 8, 16, 32];
+      const CHUNK_STEPS = [4, 8, 16];
       const chunksA = sliceIntoSpheres(fxSceneA, CHUNK_STEPS[Math.round(Number(document.querySelector('#chunks-slider-a').value))] || 16);
       for (const c of chunksA) {
         const buf = convertSplatDataToBuffer(c);
@@ -3745,7 +3911,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneB) {
       const fxSceneB = processFx(sceneB, 'deckB');
-      const CHUNK_STEPS_B = [4, 8, 16, 32];
+      const CHUNK_STEPS_B = [4, 8, 16];
       const chunksB = sliceIntoSpheres(fxSceneB, CHUNK_STEPS_B[Math.round(Number(document.querySelector('#chunks-slider-b').value))] || 16);
       for (const c of chunksB) {
         const buf = convertSplatDataToBuffer(c);
@@ -3766,7 +3932,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneC) {
       const fxSceneC = processFx(sceneC, 'deckC');
-      const CHUNK_STEPS_C = [4, 8, 16, 32];
+      const CHUNK_STEPS_C = [4, 8, 16];
       const chunksC = sliceIntoSpheres(fxSceneC, CHUNK_STEPS_C[Math.round(Number(document.querySelector('#chunks-slider-c')?.value))] || 16);
       for (const c of chunksC) {
         const buf = convertSplatDataToBuffer(c);
@@ -3780,7 +3946,7 @@ async function rebuildViewerBuffers() {
 
     if (sceneD) {
       const fxSceneD = processFx(sceneD, 'deckD');
-      const CHUNK_STEPS_D = [4, 8, 16, 32];
+      const CHUNK_STEPS_D = [4, 8, 16];
       const chunksD = sliceIntoSpheres(fxSceneD, CHUNK_STEPS_D[Math.round(Number(document.querySelector('#chunks-slider-d')?.value))] || 16);
       for (const c of chunksD) {
         const buf = convertSplatDataToBuffer(c);
@@ -4363,20 +4529,9 @@ function applyMixerSettings(splatData, settings) {
     const dz = (pz - bounds.center[2]) / bounds.size[2];
     const radius = Math.min(1.0, Math.sqrt(dx * dx + dy * dy + dz * dz));
 
-    let eqFactor = 1.0;
-    if (radius < 0.33) {
-      eqFactor = settings.low;
-    } else if (radius < 0.66) {
-      eqFactor = settings.mid;
-    } else {
-      eqFactor = settings.high;
-    }
-
-    const scaleFactor = eqFactor;
-
-    view.setFloat32(base + 12, view.getFloat32(base + 12, true) * scaleFactor, true);
-    view.setFloat32(base + 16, view.getFloat32(base + 16, true) * scaleFactor, true);
-    view.setFloat32(base + 20, view.getFloat32(base + 20, true) * scaleFactor, true);
+    // EQ is now applied LIVE per-chunk in the render loop (see volScale/eqFactor),
+    // so it is no longer baked into geometry here. radius/zone kept for reference.
+    void radius;
   }
 }
 
@@ -4421,7 +4576,7 @@ document.addEventListener('input', (e) => {
     const deck = e.target.id.split('-').pop();
     const valEl = document.getElementById(`chunks-val-${deck}`);
     // Slider is index 0-3 → actual chunk count [4,8,16,32]
-    const CHUNK_STEPS = [4, 8, 16, 32];
+    const CHUNK_STEPS = [4, 8, 16];
     const chunkCount = CHUNK_STEPS[Math.round(parseFloat(e.target.value))] || 16;
     if (valEl) valEl.textContent = chunkCount;
     const min = parseFloat(e.target.min), max = parseFloat(e.target.max);
@@ -4532,7 +4687,8 @@ async function performRealtimeUpdate() {
     const amountB = Number(fxDepthB.value) / 100;
     const amountM = Number(fxDepthM.value) / 100;
 
-    const dofVal = Number(knobDof.value) / 100;
+    // DOF capped to 25% of the previous range to avoid heavy overdraw / fps drop.
+    const dofVal = (Number(knobDof.value) / 100) * 0.25;
 
     if (viewer.splatMesh && viewer.splatMesh.material && viewer.splatMesh.material.uniforms && viewer.splatMesh.material.uniforms.uFxTime) {
       const uniforms = viewer.splatMesh.material.uniforms;
@@ -4638,10 +4794,11 @@ async function performRealtimeUpdate() {
       if (uniforms.uLoopActiveA !== undefined) {
         const deckAOffset = 0;
         const deckBOffset = numChunksA + numRollChunksA;
-        uniforms.uLoopActiveA.value = loopActiveA ? 1.0 : 0.0;
+        // Orange tint shows only while SELECTING; once committed (#6) it clears.
+        uniforms.uLoopActiveA.value = (loopActiveA && !loopCommittedA) ? 1.0 : 0.0;
         uniforms.uLoopStartA.value  = deckAOffset + Math.max(0, loopChunkStartA);
         uniforms.uLoopEndA.value    = deckAOffset + Math.min(Math.max(0, numChunksA - 1), loopChunkEndA);
-        uniforms.uLoopActiveB.value = loopActiveB ? 1.0 : 0.0;
+        uniforms.uLoopActiveB.value = (loopActiveB && !loopCommittedB) ? 1.0 : 0.0;
         uniforms.uLoopStartB.value  = deckBOffset + Math.max(0, loopChunkStartB);
         uniforms.uLoopEndB.value    = deckBOffset + Math.min(Math.max(0, numChunksB - 1), loopChunkEndB);
         // Expose for headless verification
@@ -4782,7 +4939,9 @@ async function performRealtimeUpdate() {
     // Slow time seed for subtle animation of the chaos (advances ~1 unit per second).
     const pitchTimeSeed = Math.floor(now * 0.001) & 0xffff;
 
-    const volScaleA = Math.max(0.0001, Number(volAEl.value) / 100);
+    const volTargetA = Math.max(0.0001, Number(volAEl.value) / 100);
+    volScaleSmoothA += (volTargetA - volScaleSmoothA) * VOL_SMOOTH_ALPHA;
+    const volScaleA = volScaleSmoothA;
     nudgeXA *= 0.9;
 
     // Apply fast GPU transforms and visibility to Scene A
@@ -4848,9 +5007,15 @@ async function performRealtimeUpdate() {
         rX = 0; rY = 0; rZ = 0;
       }
 
+      // #6 committed loop: chunks outside the selected range scale to 0.
+      if (loopCommittedA && i < numChunksA && (i < loopChunkStartA || i > loopChunkEndA)) {
+        targetScaleFactor = 0;
+        targetVisible = false;
+      }
+
       currentScalesA[i] += (targetScaleFactor - currentScalesA[i]) * 0.15;
       splatScene.visible = targetVisible;
-      
+
       const scaleA = targetDist / boundsA.maxDist;
       const activeScale = Math.max(0.0001, currentScalesA[i] * scaleA * beatScaleMult);
       
@@ -4879,7 +5044,9 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
       _scratchV.copy(boundsA.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      splatScene.scale.setScalar(finalScale * volScaleA);
+      // Live EQ: outer/mid/inner chunks scaled by HI/MID/LOW knob (0 = cut to nothing).
+      const eqFA = (i < numChunksA) ? eqFactorForChunk(i, numChunksA, eqHiAEl, eqMidAEl, eqLowAEl) : 1.0;
+      splatScene.scale.setScalar(finalScale * volScaleA * eqFA);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
       splatScene.position.x += nudgeXA;
@@ -4894,7 +5061,9 @@ async function performRealtimeUpdate() {
       }
     }
 
-    const volScaleB = Math.max(0.0001, Number(volBEl.value) / 100);
+    const volTargetB = Math.max(0.0001, Number(volBEl.value) / 100);
+    volScaleSmoothB += (volTargetB - volScaleSmoothB) * VOL_SMOOTH_ALPHA;
+    const volScaleB = volScaleSmoothB;
     nudgeXB *= 0.9;
 
     // Apply fast GPU transforms and visibility to Scene B
@@ -4957,9 +5126,15 @@ async function performRealtimeUpdate() {
         rX = 0; rY = 0; rZ = 0;
       }
 
+      // #6 committed loop: chunks outside the selected range scale to 0.
+      if (loopCommittedB && i < numChunksB && (i < loopChunkStartB || i > loopChunkEndB)) {
+        targetScaleFactor = 0;
+        targetVisible = false;
+      }
+
       currentScalesB[i] += (targetScaleFactor - currentScalesB[i]) * 0.15;
       splatScene.visible = targetVisible;
-      
+
       const scaleB = targetDist / boundsB.maxDist;
       const activeScale = Math.max(0.0001, currentScalesB[i] * scaleB * beatScaleMult);
       
@@ -4987,7 +5162,9 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
       _scratchV.copy(boundsB.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      splatScene.scale.setScalar(finalScale * volScaleB);
+      // Live EQ (deck B).
+      const eqFB = (i < numChunksB) ? eqFactorForChunk(i, numChunksB, eqHiBEl, eqMidBEl, eqLowBEl) : 1.0;
+      splatScene.scale.setScalar(finalScale * volScaleB * eqFB);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
       splatScene.position.x += nudgeXB;
@@ -5188,6 +5365,9 @@ if (btnResetOrient) {
     // Zero the object playback/jog rotation so geometry returns to upright.
     playAngleA = 0; playAngleB = 0; playAngleC = 0; playAngleD = 0;
     jogAngleA = 0; jogAngleB = 0; jogAngleC = 0; jogAngleD = 0;
+    // Constant zoom: always return Master-Volume to its neutral value so RESET VIEW
+    // lands on the SAME distance every time (no creep in/out from prior wheel zoom).
+    if (masterVol) { masterVol.value = 50; updateKnobFill(masterVol); }
     // Reframe at the default distance (re-derives baseFramedDistance + applies zoom).
     if (typeof centerCamera === 'function') centerCamera();
     // Clear active pad highlights.
@@ -5243,6 +5423,13 @@ btnReset.addEventListener('click', async () => {
   // Loops off.
   loopActiveA = false; isAutoLoopA = false;
   loopActiveB = false; isAutoLoopB = false;
+  loopCommittedA = false; loopCommittedB = false;
+  for (const d of ['a', 'b']) {
+    const tBtn = document.getElementById(`loop-toggle-${d}`);
+    if (tBtn) { tBtn.classList.remove('active'); tBtn.textContent = 'GO'; }
+  }
+  // Pad modes back to Hot Cue.
+  setPadMode('a', 'hotcue'); setPadMode('b', 'hotcue');
   document.getElementById('loop-active-a')?.classList.remove('active');
   document.getElementById('loop-active-b')?.classList.remove('active');
   document.querySelectorAll('.pad-btn.active').forEach(el => el.classList.remove('active'));
