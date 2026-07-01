@@ -7,6 +7,7 @@ import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
+import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel } from './gamepad.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
 window._simulateMidi = _simulateMIDIMessage;
 // Test hooks for the built-in override layer.
@@ -707,7 +708,8 @@ appDiv.innerHTML = `
     </div>
     <div style="font-size:10px; color:#94a3b8; margin-bottom:8px; line-height:1.4;">
       Click <b style="color:#ddd6fe;">learn</b>, then move or press the control on your controller to bind it.
-      <span style="color:#666;">✕ clears a binding · captured value shows live so you can spot duplicates.</span>
+      Click <b style="color:#fde68a;">🎮</b> to bind a gamepad button/stick instead (press pad button or push a stick).
+      <span style="color:#666;">✕ clears a binding · captured value shows live so you can spot duplicates · gamepad bindings persist separately and work alongside a DDJ.</span>
     </div>
     <div id="midi-map-rows" style="max-height:52vh; overflow-y:auto; padding-right:6px; margin-bottom:12px;"></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
@@ -2043,7 +2045,7 @@ window._buildTableFromImport = buildTableFromImport;
   }
 
   let learning = null; // { actionId, bindEl }
-  function disarm() { learning = null; setMidiLearn(false, null); }
+  function disarm() { learning = null; setMidiLearn(false, null); setGamepadLearn(false, null); }
   function arm(actionId, bindEl) {
     if (learning) disarm();
     learning = { actionId, bindEl };
@@ -2054,6 +2056,21 @@ window._buildTableFromImport = buildTableFromImport;
       bindEl.textContent = `ch${msg.channel} ${msg.type === 'cc' ? 'CC' : 'NOTE'} ${msg.data1} =${msg.value}`;
       if (msg.type === 'note' && msg.value === 0) return; // wait for the press, not release
       setBinding(learning.actionId, msg);
+      disarm();
+      render();
+    });
+  }
+
+  // Arm GAMEPAD learn for a row: next pad button press / stick push binds this action.
+  // Gamepad bindings live in their own store (gamepad.js), independent of the MIDI
+  // profile, so the pad keeps working across DDJ profile switches.
+  function armPad(actionId, padEl) {
+    if (learning) disarm();
+    learning = { actionId, bindEl: padEl };
+    padEl.textContent = 'press pad…';
+    padEl.style.color = '#fbbf24';
+    setGamepadLearn(true, (msg) => {
+      setGamepadBinding(actionId, msg);
       disarm();
       render();
     });
@@ -2084,10 +2101,26 @@ window._buildTableFromImport = buildTableFromImport;
         learn.addEventListener('click', () => arm(id, bind));
         const clr = document.createElement('button');
         clr.textContent = '✕';
-        clr.title = 'Clear this binding';
+        clr.title = 'Clear this MIDI binding';
         clr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
         clr.addEventListener('click', () => { clearBinding(id); render(); });
-        row.append(name, bind, learn, clr);
+
+        // ── Gamepad (HID pad) binding: own label + learn + clear ──
+        const padBind = document.createElement('span');
+        padBind.textContent = getGamepadBindingLabel(id) || '—';
+        padBind.style.cssText = 'font-size:10px;color:#f59e0b;min-width:96px;text-align:right;font-family:monospace;';
+        const padLearn = document.createElement('button');
+        padLearn.textContent = '🎮';
+        padLearn.title = 'Bind a gamepad button/stick to this control';
+        padLearn.style.cssText = 'background:#78350f;border:1px solid #f59e0b;color:#fde68a;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;';
+        padLearn.addEventListener('click', () => armPad(id, padBind));
+        const padClr = document.createElement('button');
+        padClr.textContent = '✕';
+        padClr.title = 'Clear this gamepad binding';
+        padClr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
+        padClr.addEventListener('click', () => { clearGamepadBinding(id); render(); });
+
+        row.append(name, bind, learn, clr, padBind, padLearn, padClr);
         listEl.appendChild(row);
       }
     }
@@ -5814,6 +5847,12 @@ btnExport.addEventListener('click', () => {
 
 // ── Initialize Web MIDI ──────────────────────────────────
 initMIDI();
+
+// ── Initialize HID gamepad (PlayStation / Xbox pad) support ──
+// Feeds the same APP_ACTIONS engine as MIDI. Pad appears after its first button
+// press (browser gesture requirement); default standard-layout map works out of
+// the box, remappable via the MIDI-MAP wizard's 🎮 buttons.
+initGamepad();
 
 // --- BIND DECKS C & D ---
 function bindDeckEvents(deckLetter) {

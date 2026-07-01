@@ -598,7 +598,7 @@ function buildCamActions(deck) {
  * @param {number} value     data2 of the message (velocity for notes, 0-127 for CC).
  * @param {boolean} isNote   true for note on/off, false for CC.
  */
-function runAction(actionId, value, isNote) {
+export function runAction(actionId, value, isNote) {
   const action = APP_ACTIONS[actionId];
   if (!action) return;
   switch (action.kind) {
