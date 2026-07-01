@@ -7,7 +7,7 @@ import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
-import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel } from './gamepad.js';
+import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
 window._simulateMidi = _simulateMIDIMessage;
 // Test hooks for the built-in override layer.
@@ -1728,6 +1728,15 @@ function populateMidiDeviceDropdown(selectValue) {
     opt.textContent = p.label;
     sel.appendChild(opt);
   }
+  // Gamepad pseudo-profile, listed under the DDJ built-ins. Selecting it doesn't
+  // change MIDI routing (the pad is a separate always-on input); it switches the
+  // MIDI-MAP wizard to show/edit the gamepad bindings.
+  {
+    const opt = document.createElement('option');
+    opt.value = 'gamepad';
+    opt.textContent = '🎮 Gamepad';
+    sel.appendChild(opt);
+  }
   if (customs.length) {
     const grp = document.createElement('optgroup');
     grp.label = 'Custom';
@@ -1743,13 +1752,19 @@ function populateMidiDeviceDropdown(selectValue) {
   // Restore / apply selection.
   const exists = [...sel.options].some(o => o.value === prev);
   sel.value = exists ? prev : 'ddj-flx4';
-  if (selectValue) setMidiProfile(sel.value);
+  if (selectValue && sel.value !== 'gamepad') setMidiProfile(sel.value);
 }
 // Expose so the guided-mapping wizard can refresh + auto-select after saving.
 window._populateMidiDeviceDropdown = populateMidiDeviceDropdown;
 
 document.getElementById('midi-device')?.addEventListener('change', (e) => {
   lockAutoDetect(); // user made a deliberate choice — stop auto-detect from overriding it
+  if (e.target.value === 'gamepad') {
+    // Don't touch MIDI routing — keep whatever DDJ profile was active so the pad
+    // runs alongside it. Just open the map wizard to show the gamepad bindings.
+    if (window._openMidiMap) window._openMidiMap();
+    return;
+  }
   setMidiProfile(e.target.value);
 });
 
@@ -2077,8 +2092,10 @@ window._buildTableFromImport = buildTableFromImport;
   }
 
   function render() {
-    const table = currentTable();
-    titleEl.textContent = `MIDI MAP — ${activeName() || '(no profile)'}`;
+    // Gamepad view: the '🎮 Gamepad' dropdown entry shows/edits pad bindings only.
+    const gpView = activeName() === 'gamepad';
+    const table = gpView ? {} : currentTable();
+    titleEl.textContent = gpView ? 'GAMEPAD MAP' : `MIDI MAP — ${activeName() || '(no profile)'}`;
     listEl.innerHTML = '';
     for (const sec of SECTIONS) {
       const h = document.createElement('div');
@@ -2092,27 +2109,15 @@ window._buildTableFromImport = buildTableFromImport;
         const name = document.createElement('span');
         name.textContent = label;
         name.style.cssText = 'font-size:11px;color:#dcdce6;flex:1;';
-        const bind = document.createElement('span');
-        bind.textContent = bindingLabelFor(id, table);
-        bind.style.cssText = 'font-size:10px;color:#10b981;min-width:104px;text-align:right;font-family:monospace;';
-        const learn = document.createElement('button');
-        learn.textContent = 'learn';
-        learn.style.cssText = 'background:#4c1d95;border:1px solid #7c3aed;color:#ddd6fe;font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer;';
-        learn.addEventListener('click', () => arm(id, bind));
-        const clr = document.createElement('button');
-        clr.textContent = '✕';
-        clr.title = 'Clear this MIDI binding';
-        clr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
-        clr.addEventListener('click', () => { clearBinding(id); render(); });
 
-        // ── Gamepad (HID pad) binding: own label + learn + clear ──
+        // ── Gamepad (HID pad) binding: label + learn + clear ──
         const padBind = document.createElement('span');
         padBind.textContent = getGamepadBindingLabel(id) || '—';
         padBind.style.cssText = 'font-size:10px;color:#f59e0b;min-width:96px;text-align:right;font-family:monospace;';
         const padLearn = document.createElement('button');
-        padLearn.textContent = '🎮';
+        padLearn.textContent = gpView ? 'learn' : '🎮';
         padLearn.title = 'Bind a gamepad button/stick to this control';
-        padLearn.style.cssText = 'background:#78350f;border:1px solid #f59e0b;color:#fde68a;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;';
+        padLearn.style.cssText = 'background:#78350f;border:1px solid #f59e0b;color:#fde68a;font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer;';
         padLearn.addEventListener('click', () => armPad(id, padBind));
         const padClr = document.createElement('button');
         padClr.textContent = '✕';
@@ -2120,7 +2125,25 @@ window._buildTableFromImport = buildTableFromImport;
         padClr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
         padClr.addEventListener('click', () => { clearGamepadBinding(id); render(); });
 
-        row.append(name, bind, learn, clr, padBind, padLearn, padClr);
+        if (gpView) {
+          // Pad-only view: just the gamepad columns.
+          row.append(name, padBind, padLearn, padClr);
+        } else {
+          // MIDI view: MIDI columns first, gamepad columns after.
+          const bind = document.createElement('span');
+          bind.textContent = bindingLabelFor(id, table);
+          bind.style.cssText = 'font-size:10px;color:#10b981;min-width:104px;text-align:right;font-family:monospace;';
+          const learn = document.createElement('button');
+          learn.textContent = 'learn';
+          learn.style.cssText = 'background:#4c1d95;border:1px solid #7c3aed;color:#ddd6fe;font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer;';
+          learn.addEventListener('click', () => arm(id, bind));
+          const clr = document.createElement('button');
+          clr.textContent = '✕';
+          clr.title = 'Clear this MIDI binding';
+          clr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
+          clr.addEventListener('click', () => { clearBinding(id); render(); });
+          row.append(name, bind, learn, clr, padBind, padLearn, padClr);
+        }
         listEl.appendChild(row);
       }
     }
@@ -2136,11 +2159,14 @@ window._buildTableFromImport = buildTableFromImport;
     if (builtin(name)) { clearProfileOverride(name); setMidiProfile(name); render(); }
   });
   if (btnExport) btnExport.addEventListener('click', () => {
-    const data = { profile: activeName(), mappingTable: currentTable() };
+    const gpView = activeName() === 'gamepad';
+    const data = gpView
+      ? { profile: 'gamepad', gamepadBindings: getGamepadBindings() }
+      : { profile: activeName(), mappingTable: currentTable() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'midi-map.json'; a.click();
+    a.href = url; a.download = gpView ? 'gamepad-map.json' : 'midi-map.json'; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   // Re-render when the active profile changes via the device dropdown.
