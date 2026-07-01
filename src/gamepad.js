@@ -90,12 +90,18 @@ function _persist() {
   }
 }
 
-/** Resolve a control (gpIndex, code) to an actionId: user binding first, else default. */
-function _resolve(gpIndex, code) {
+/**
+ * Resolve a control (gpIndex, code) to an actionId: user binding first, else the
+ * built-in default. Defaults ONLY apply to standard-mapped pads — a non-standard
+ * pad (many generic USB/PS pads) has different button/axis indices, so applying
+ * the standard-layout defaults would drive the WRONG controls (e.g. a resting
+ * axis flooding the crossfader). Non-standard pads stay neutral until the user
+ * maps them via the wizard.
+ */
+function _resolve(gpIndex, code, useDefaults) {
   const userId = _bindings[`${gpIndex}:${code}`];
   if (userId) return userId;
-  // Defaults are keyed by code alone (apply to any standard pad).
-  return DEFAULT_MAP[code] || null;
+  return useDefaults ? (DEFAULT_MAP[code] || null) : null;
 }
 
 /** Is an action continuous (fader/knob) rather than a momentary button? */
@@ -171,11 +177,13 @@ export function setGamepadLearn(enabled, sinkFn) {
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 // Per-gamepad previous state so we can edge-detect buttons and de-jitter axes.
-const _prev = {}; // gpIndex → { buttons: number[], axes: number[] }
+const _prev = {}; // gpIndex → { buttons: number[], axes: number[], axisEngaged: bool[] }
 
 function _pollGamepad(gp) {
   const gi = gp.index;
-  const prev = _prev[gi] || (_prev[gi] = { buttons: [], axes: [] });
+  const prev = _prev[gi] || (_prev[gi] = { buttons: [], axes: [], axisEngaged: [] });
+  // Standard-mapped pads get the built-in default map; others stay neutral until mapped.
+  const useDefaults = gp.mapping === 'standard';
 
   // ── Buttons (includes analog triggers via .value) ──
   for (let b = 0; b < gp.buttons.length; b++) {
@@ -184,7 +192,7 @@ function _pollGamepad(gp) {
     const wasPressed = (prev.buttons[b] ?? 0) >= BTN_THRESHOLD;
     const isPressed  = val >= BTN_THRESHOLD;
 
-    const actionId = _resolve(gi, b);
+    const actionId = _resolve(gi, b, useDefaults);
     if (actionId) {
       if (_isContinuous(actionId)) {
         // Analog trigger driving a fader/knob: dispatch on meaningful change.
@@ -210,9 +218,16 @@ function _pollGamepad(gp) {
     // Deadzone around center so a resting stick doesn't stream values.
     const dz = Math.abs(raw) < AXIS_DEADZONE ? 0 : raw;
     const code = AXIS_CODE_BASE + a;
-    const actionId = _resolve(gi, code);
+    const actionId = _resolve(gi, code, useDefaults);
 
-    if (actionId && (Math.abs(dz - (prev.axes[a] ?? 0)) >= AXIS_EPS)) {
+    // Engage gate: an axis pinned/drifting away from center at connect time (common
+    // on non-standard pads whose "axes" are really a resting D-pad/trigger) must NOT
+    // drive a control until it has first been seen near center. This stops a stuck
+    // axis from hijacking a fader (e.g. the crossfader) before the user touches it.
+    if (!prev.axisEngaged[a] && Math.abs(raw) < AXIS_DEADZONE) prev.axisEngaged[a] = true;
+    const engaged = prev.axisEngaged[a];
+
+    if (actionId && engaged && (Math.abs(dz - (prev.axes[a] ?? 0)) >= AXIS_EPS)) {
       if (_isContinuous(actionId)) {
         // Map -1..1 → 0..127 (center = ~63).
         runAction(actionId, Math.round(((dz + 1) / 2) * 127), false);
