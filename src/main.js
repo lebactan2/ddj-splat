@@ -8,6 +8,7 @@ import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
 import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
+import { initKeyboard, setKeyboardLearn, setKeyboardBinding, clearKeyboardBinding, getKeyboardBindingLabel, getKeyboardBindings } from './keyboard.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
 window._simulateMidi = _simulateMIDIMessage;
 // Test hooks for the built-in override layer.
@@ -1737,6 +1738,14 @@ function populateMidiDeviceDropdown(selectValue) {
     opt.textContent = '🎮 Gamepad';
     sel.appendChild(opt);
   }
+  // Keyboard pseudo-profile — same idea as gamepad: separate always-on input,
+  // selecting it switches the wizard to show/edit key bindings.
+  {
+    const opt = document.createElement('option');
+    opt.value = 'keyboard';
+    opt.textContent = '⌨ Keyboard';
+    sel.appendChild(opt);
+  }
   if (customs.length) {
     const grp = document.createElement('optgroup');
     grp.label = 'Custom';
@@ -1752,16 +1761,16 @@ function populateMidiDeviceDropdown(selectValue) {
   // Restore / apply selection.
   const exists = [...sel.options].some(o => o.value === prev);
   sel.value = exists ? prev : 'ddj-flx4';
-  if (selectValue && sel.value !== 'gamepad') setMidiProfile(sel.value);
+  if (selectValue && sel.value !== 'gamepad' && sel.value !== 'keyboard') setMidiProfile(sel.value);
 }
 // Expose so the guided-mapping wizard can refresh + auto-select after saving.
 window._populateMidiDeviceDropdown = populateMidiDeviceDropdown;
 
 document.getElementById('midi-device')?.addEventListener('change', (e) => {
   lockAutoDetect(); // user made a deliberate choice — stop auto-detect from overriding it
-  if (e.target.value === 'gamepad') {
+  if (e.target.value === 'gamepad' || e.target.value === 'keyboard') {
     // Don't touch MIDI routing — keep whatever DDJ profile was active so the pad
-    // runs alongside it. Just open the map wizard to show the gamepad bindings.
+    // / keyboard runs alongside it. Just open the map wizard to show its bindings.
     if (window._openMidiMap) window._openMidiMap();
     return;
   }
@@ -2060,7 +2069,7 @@ window._buildTableFromImport = buildTableFromImport;
   }
 
   let learning = null; // { actionId, bindEl }
-  function disarm() { learning = null; setMidiLearn(false, null); setGamepadLearn(false, null); }
+  function disarm() { learning = null; setMidiLearn(false, null); setGamepadLearn(false, null); setKeyboardLearn(false, null); }
   function arm(actionId, bindEl) {
     if (learning) disarm();
     learning = { actionId, bindEl };
@@ -2091,11 +2100,29 @@ window._buildTableFromImport = buildTableFromImport;
     });
   }
 
+  // Arm KEYBOARD learn for a row: next key press binds this action. Keyboard
+  // bindings live in their own store (keyboard.js), independent of MIDI/gamepad.
+  function armKey(actionId, keyEl) {
+    if (learning) disarm();
+    learning = { actionId, bindEl: keyEl };
+    keyEl.textContent = 'press key…';
+    keyEl.style.color = '#fbbf24';
+    setKeyboardLearn(true, (msg) => {
+      setKeyboardBinding(actionId, msg);
+      disarm();
+      render();
+    });
+  }
+
   function render() {
-    // Gamepad view: the '🎮 Gamepad' dropdown entry shows/edits pad bindings only.
+    // The '🎮 Gamepad' / '⌨ Keyboard' dropdown entries switch to input-specific
+    // views that show/edit only that input's bindings.
     const gpView = activeName() === 'gamepad';
-    const table = gpView ? {} : currentTable();
-    titleEl.textContent = gpView ? 'GAMEPAD MAP' : `MIDI MAP — ${activeName() || '(no profile)'}`;
+    const kbView = activeName() === 'keyboard';
+    const table = (gpView || kbView) ? {} : currentTable();
+    titleEl.textContent = gpView ? 'GAMEPAD MAP'
+      : kbView ? 'KEYBOARD MAP'
+      : `MIDI MAP — ${activeName() || '(no profile)'}`;
     listEl.innerHTML = '';
     for (const sec of SECTIONS) {
       const h = document.createElement('div');
@@ -2109,6 +2136,26 @@ window._buildTableFromImport = buildTableFromImport;
         const name = document.createElement('span');
         name.textContent = label;
         name.style.cssText = 'font-size:11px;color:#dcdce6;flex:1;';
+
+        if (kbView) {
+          // ── Keyboard-only view: key binding + learn + clear ──
+          const kbBind = document.createElement('span');
+          kbBind.textContent = getKeyboardBindingLabel(id) || '—';
+          kbBind.style.cssText = 'font-size:10px;color:#38bdf8;min-width:96px;text-align:right;font-family:monospace;';
+          const kbLearn = document.createElement('button');
+          kbLearn.textContent = 'learn';
+          kbLearn.title = 'Bind a keyboard key to this control';
+          kbLearn.style.cssText = 'background:#0c4a6e;border:1px solid #38bdf8;color:#bae6fd;font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer;';
+          kbLearn.addEventListener('click', () => armKey(id, kbBind));
+          const kbClr = document.createElement('button');
+          kbClr.textContent = '✕';
+          kbClr.title = 'Clear this keyboard binding';
+          kbClr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
+          kbClr.addEventListener('click', () => { clearKeyboardBinding(id); render(); });
+          row.append(name, kbBind, kbLearn, kbClr);
+          listEl.appendChild(row);
+          continue;
+        }
 
         // ── Gamepad (HID pad) binding: label + learn + clear ──
         const padBind = document.createElement('span');
@@ -2159,14 +2206,15 @@ window._buildTableFromImport = buildTableFromImport;
     if (builtin(name)) { clearProfileOverride(name); setMidiProfile(name); render(); }
   });
   if (btnExport) btnExport.addEventListener('click', () => {
-    const gpView = activeName() === 'gamepad';
-    const data = gpView
-      ? { profile: 'gamepad', gamepadBindings: getGamepadBindings() }
-      : { profile: activeName(), mappingTable: currentTable() };
+    const view = activeName();
+    let data, fname;
+    if (view === 'gamepad') { data = { profile: 'gamepad', gamepadBindings: getGamepadBindings() }; fname = 'gamepad-map.json'; }
+    else if (view === 'keyboard') { data = { profile: 'keyboard', keyboardBindings: getKeyboardBindings() }; fname = 'keyboard-map.json'; }
+    else { data = { profile: view, mappingTable: currentTable() }; fname = 'midi-map.json'; }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = gpView ? 'gamepad-map.json' : 'midi-map.json'; a.click();
+    a.href = url; a.download = fname; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   // Re-render when the active profile changes via the device dropdown.
@@ -5879,6 +5927,11 @@ initMIDI();
 // press (browser gesture requirement); default standard-layout map works out of
 // the box, remappable via the MIDI-MAP wizard's 🎮 buttons.
 initGamepad();
+
+// ── Initialize computer/Bluetooth keyboard mapping ──
+// Same APP_ACTIONS engine; keydown/keyup drive momentary actions. Default map
+// works out of the box, remappable via the '⌨ Keyboard' profile in the wizard.
+initKeyboard();
 
 // --- BIND DECKS C & D ---
 function bindDeckEvents(deckLetter) {
