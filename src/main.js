@@ -517,7 +517,7 @@ appDiv.innerHTML = `
         <button class="round-btn sync" id="sync-a">SYNC</button>
         <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
-          <div class="bpm-display" id="bpm-a" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
+          <div class="bpm-display" id="bpm-a" contenteditable="true" spellcheck="false" title="Click to type BPM" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;cursor:text;outline:none;">120.0</div>
           <button id="tempo-range-label-a" onclick="window._cycleTempoRange('a')" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';background:transparent;border:1px solid #f97316;border-radius:3px;padding:1px 4px;cursor:pointer;line-height:1.2;">±10%</button>
         </div>
       </div>
@@ -596,7 +596,7 @@ appDiv.innerHTML = `
         <button class="round-btn sync" id="sync-b">SYNC</button>
        <div class="flex-row" style="align-items:center; gap:3px;">
           <span style="font-size:10px;color:#888;">BPM</span>
-          <div class="bpm-display" id="bpm-b" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;">120.0</div>
+          <div class="bpm-display" id="bpm-b" contenteditable="true" spellcheck="false" title="Click to type BPM" style="font-family:'Share Tech Mono';color:#fff;font-size:14px;background:#000;padding:2px 6px;border-radius:2px;cursor:text;outline:none;">120.0</div>
           <button id="tempo-range-label-b" onclick="window._cycleTempoRange('b')" style="font-size:8px;color:#f97316;font-family:'Share Tech Mono';background:transparent;border:1px solid #f97316;border-radius:3px;padding:1px 4px;cursor:pointer;line-height:1.2;">±10%</button>
         </div>
       </div>
@@ -667,7 +667,7 @@ appDiv.innerHTML = `
           <option value="ddj-400">DDJ-400</option>
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
         </select>
-        <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">GUIDED MAP</button>
+        <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">MIDI MAP</button>
         <input id="midi-import-file" type="file" accept="application/json,.json" style="display:none;" />
       </div>
     </div>
@@ -701,26 +701,19 @@ appDiv.innerHTML = `
     box-shadow: 0 0 40px rgba(124,58,237,0.5);
     pointer-events: auto;
   ">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-      <div style="color:#a78bfa; font-size:13px; font-weight:bold; letter-spacing:1px;">GUIDED MIDI MAPPING — DDJ-FLX4</div>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div id="midi-map-title" style="color:#a78bfa; font-size:13px; font-weight:bold; letter-spacing:1px;">MIDI MAP</div>
       <button id="midi-guide-close" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer; line-height:1;">✕</button>
     </div>
-    <div id="midi-guide-progress" style="color:#7c3aed; font-size:11px; margin-bottom:10px; letter-spacing:0.5px;">Step 1 / 34</div>
-    <div id="midi-guide-label" style="color:#fff; font-size:15px; font-weight:bold; margin-bottom:6px;">—</div>
-    <div id="midi-guide-instruction" style="color:#94a3b8; font-size:11px; margin-bottom:14px;">—</div>
-    <div style="background:#111; border:1px solid #333; border-radius:6px; padding:10px 14px; margin-bottom:16px; min-height:44px;">
-      <div style="font-size:9px; color:#666; margin-bottom:4px; letter-spacing:0.5px;">DETECTED:</div>
-      <div id="midi-guide-detected" style="color:#10b981; font-size:12px; font-family:'Share Tech Mono', monospace;">—  (move the control now)</div>
+    <div style="font-size:10px; color:#94a3b8; margin-bottom:8px; line-height:1.4;">
+      Click <b style="color:#ddd6fe;">learn</b>, then move or press the control on your controller to bind it.
+      <span style="color:#666;">✕ clears a binding · captured value shows live so you can spot duplicates.</span>
     </div>
+    <div id="midi-map-rows" style="max-height:52vh; overflow-y:auto; padding-right:6px; margin-bottom:12px;"></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-      <button id="midi-guide-back"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Back</button>
-      <button id="midi-guide-skip"    style="background:#1e1e2e; border:1px solid #444; color:#aaa; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;">Skip</button>
-      <button id="midi-guide-confirm" style="background:#7c3aed; border:none; color:#fff; font-size:10px; padding:5px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-family:inherit;">Confirm &amp; Next</button>
-      <button id="midi-guide-apply"   style="background:#4c1d95; border:1px solid #7c3aed; color:#ddd6fe; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" disabled title="Re-map only the controls you confirmed; keep the built-in's behavior for the rest">Apply edits</button>
-      <button id="midi-guide-reset"   style="background:#3f1d1d; border:1px solid #b91c1c; color:#fca5a5; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Remove all your edits and restore the built-in factory mapping">Reset to factory</button>
-      <button id="midi-guide-save"    style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" disabled title="Save the profile and download a .json backup">💾 Save profile</button>
-      <button id="midi-guide-import"  style="background:#1e1e2e; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Load a mapping file (.json) as a profile">⏏ Upload</button>
-      <button id="midi-guide-finish"  style="display:none;" disabled>Download</button>
+      <button id="midi-map-reset"  style="background:#3f1d1d; border:1px solid #b91c1c; color:#fca5a5; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Remove all your edits and restore the built-in factory mapping">Reset to factory</button>
+      <button id="midi-map-export" style="background:#065f46; border:1px solid #10b981; color:#10b981; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit;" title="Download the active profile's bindings as JSON">⬇ Export</button>
+      <button id="midi-guide-import" style="background:#1e1e2e; border:1px solid #3b82f6; color:#93c5fd; font-size:10px; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; margin-left:auto;" title="Load a mapping file (.json) as a profile">⏏ Import</button>
     </div>
   </div>
 
@@ -1017,11 +1010,24 @@ const eqLowAEl = document.querySelector('#eq-low-a');
 const eqHiBEl = document.querySelector('#eq-hi-b');
 const eqMidBEl = document.querySelector('#eq-mid-b');
 const eqLowBEl = document.querySelector('#eq-low-b');
-function eqFactorForChunk(i, n, hiEl, midEl, lowEl) {
-  if (n <= 1) return midEl ? Number(midEl.value) / 50 : 1.0;
+// Smoothed EQ band factors (eased per frame) — kills MIDI knob ADC flicker so the
+// chunks don't strobe. Each = knob/50 (0 cut … 1 neutral … 2 boost). Updated once
+// per frame in updateEqSmoothing() before the deck loops use them.
+const eqSmooth = { hiA: 1, midA: 1, lowA: 1, hiB: 1, midB: 1, lowB: 1 };
+const EQ_SMOOTH_ALPHA = 0.2;
+function _eqTarget(el) { return el ? Number(el.value) / 50 : 1.0; }
+function updateEqSmoothing() {
+  eqSmooth.hiA  += (_eqTarget(eqHiAEl)  - eqSmooth.hiA)  * EQ_SMOOTH_ALPHA;
+  eqSmooth.midA += (_eqTarget(eqMidAEl) - eqSmooth.midA) * EQ_SMOOTH_ALPHA;
+  eqSmooth.lowA += (_eqTarget(eqLowAEl) - eqSmooth.lowA) * EQ_SMOOTH_ALPHA;
+  eqSmooth.hiB  += (_eqTarget(eqHiBEl)  - eqSmooth.hiB)  * EQ_SMOOTH_ALPHA;
+  eqSmooth.midB += (_eqTarget(eqMidBEl) - eqSmooth.midB) * EQ_SMOOTH_ALPHA;
+  eqSmooth.lowB += (_eqTarget(eqLowBEl) - eqSmooth.lowB) * EQ_SMOOTH_ALPHA;
+}
+function eqFactorForChunk(i, n, hi, mid, low) {
+  if (n <= 1) return mid;
   const f = i / (n - 1); // 0 = outermost chunk, 1 = innermost
-  const el = f < 0.34 ? hiEl : (f < 0.67 ? midEl : lowEl);
-  return el ? Number(el.value) / 50 : 1.0;
+  return f < 0.34 ? hi : (f < 0.67 ? mid : low);
 }
 const tempoCEl = document.querySelector('#tempo-c');
 const tempoDEl = document.querySelector('#tempo-d');
@@ -1926,8 +1932,197 @@ window._buildTableFromImport = buildTableFromImport;
   }
 })();
 
-// ── Guided MIDI Mapping Wizard ─────────────────────────────────────────────────
-(function setupMidiGuide() {
+// ── MIDI MAP (click-to-learn) ──────────────────────────────────────────────────
+// Replaces the step-through wizard. Lists every mappable VVJ function in a grid;
+// click "learn" on a row, move/press a control, and it binds. Bindings persist via
+// the profile-override layer (built-ins) or custom-profile tables, and take effect
+// immediately (the dispatcher applies overrides before built-in handlers).
+(function setupMidiMap() {
+  const panel    = document.getElementById('midi-guide-panel');
+  const btnOpen  = document.getElementById('btn-midi-guide');
+  const btnClose = document.getElementById('midi-guide-close');
+  const listEl   = document.getElementById('midi-map-rows');
+  const titleEl  = document.getElementById('midi-map-title');
+  const btnReset = document.getElementById('midi-map-reset');
+  const btnExport= document.getElementById('midi-map-export');
+  if (!panel || !btnOpen || !listEl) return;
+
+  // Ordered, sectioned registry of mappable functions (actionId → friendly label).
+  const padRows = (deck) => Array.from({ length: 8 }, (_, i) => [`pad-${deck}-${i + 1}`, `Deck ${deck.toUpperCase()} Pad ${i + 1}`]);
+  const SECTIONS = [
+    { title: 'TRANSPORT / VIEW', rows: [
+      ['play-a', 'Deck A Play/Pause'], ['cue-a', 'Deck A Cue → Stop'],
+      ['play-b', 'Deck B Play/Pause'], ['cue-b', 'Deck B Cue → Stop'],
+      ['reset-view', 'RESET VIEW (master cue)'],
+    ]},
+    { title: 'MIXER', rows: [
+      ['vol-a', 'Deck A Volume'], ['vol-b', 'Deck B Volume'],
+      ['tempo-a', 'Deck A Tempo'], ['tempo-b', 'Deck B Tempo'],
+      ['eq-hi-a', 'Deck A EQ Hi'], ['eq-mid-a', 'Deck A EQ Mid'], ['eq-low-a', 'Deck A EQ Low'],
+      ['eq-hi-b', 'Deck B EQ Hi'], ['eq-mid-b', 'Deck B EQ Mid'], ['eq-low-b', 'Deck B EQ Low'],
+      ['filter-a', 'Deck A Filter'], ['filter-b', 'Deck B Filter'],
+      ['chunks-a', 'Deck A Trim → Chunks'], ['chunks-b', 'Deck B Trim → Chunks'],
+      ['crossfader', 'Crossfader'], ['master-vol', 'Master Vol → Zoom'],
+    ]},
+    { title: 'BEAT FX', rows: [
+      ['fx-target-a', 'FX CH select → Deck A'], ['fx-target-b', 'FX CH select → Deck B'], ['fx-target-m', 'FX CH select → Master'],
+      ['fx-toggle-a', 'FX On/Off A'], ['fx-select-a', 'FX Select A'], ['fx-depth-a', 'FX Depth A'],
+      ['beat-prev-a', 'Beat ‹ A'], ['beat-next-a', 'Beat › A'],
+      ['fx-toggle-b', 'FX On/Off B'], ['fx-select-b', 'FX Select B'], ['fx-depth-b', 'FX Depth B'],
+      ['fx-toggle-m', 'FX On/Off Master'], ['fx-select-m', 'FX Select Master'], ['fx-depth-m', 'FX Depth Master'],
+    ]},
+    { title: 'LOOP', rows: [
+      ['loop-in-a', 'Loop IN A'], ['loop-out-a', 'Loop OUT A'], ['loop-toggle-a', 'Loop Activate/Exit A'],
+      ['loop-half-a', 'Loop ½ A'], ['loop-double-a', 'Loop ×2 A'], ['loop-active-a', 'Loop 4-beat A'],
+      ['loop-in-b', 'Loop IN B'], ['loop-out-b', 'Loop OUT B'], ['loop-toggle-b', 'Loop Activate/Exit B'],
+      ['loop-half-b', 'Loop ½ B'], ['loop-double-b', 'Loop ×2 B'], ['loop-active-b', 'Loop 4-beat B'],
+    ]},
+    { title: 'PAD MODE', rows: [
+      ['padmode-hotcue-a', 'Pad Mode HotCue A'], ['padmode-beatloop-a', 'Pad Mode BeatLoop A'],
+      ['padmode-beatjump-a', 'Pad Mode BeatJump A'], ['padmode-sampler-a', 'Pad Mode Sampler A'],
+      ['padmode-hotcue-b', 'Pad Mode HotCue B'], ['padmode-beatloop-b', 'Pad Mode BeatLoop B'],
+      ['padmode-beatjump-b', 'Pad Mode BeatJump B'], ['padmode-sampler-b', 'Pad Mode Sampler B'],
+    ]},
+    { title: 'PADS A', rows: padRows('a') },
+    { title: 'PADS B', rows: padRows('b') },
+    { title: 'GLOBAL', rows: [
+      ['jog-a', 'Jog A'], ['jog-b', 'Jog B'],
+      ['knob-dof', 'DOF'], ['knob-lensflare', 'Lens Flare'], ['hdri', 'HDRI scrub'],
+      ['strobe', 'Strobe toggle'], ['strobe-3state', 'Strobe 3-state (knob)'],
+    ]},
+  ];
+
+  const activeName = () => document.getElementById('midi-device')?.value || '';
+  const builtin = (name) => isBuiltinProfile(name);
+
+  // Active profile's binding table: { "type:ch:data1" -> actionId }.
+  function currentTable() {
+    const name = activeName();
+    if (builtin(name)) return { ...(getProfileOverride(name) || {}) };
+    return { ...((loadCustomProfiles()[name]) || {}) };
+  }
+  function bindingLabelFor(actionId, table) {
+    for (const k in table) if (table[k] === actionId) {
+      const [type, ch, d1] = k.split(':');
+      return `ch${ch} ${type === 'cc' ? 'CC' : 'NOTE'} ${d1}`;
+    }
+    return builtin(activeName()) ? 'default' : 'unset';
+  }
+
+  // Persist a binding (replacing any existing one for that action) and reactivate.
+  function setBinding(actionId, msg) {
+    const name = activeName();
+    const key = `${msg.type}:${msg.channel}:${msg.data1}`;
+    if (builtin(name)) {
+      const ov = { ...(getProfileOverride(name) || {}) };
+      for (const k in ov) if (ov[k] === actionId) delete ov[k];
+      ov[key] = actionId;
+      clearProfileOverride(name);
+      mergeProfileOverride(name, ov);
+    } else {
+      const t = { ...((loadCustomProfiles()[name]) || {}) };
+      for (const k in t) if (t[k] === actionId) delete t[k];
+      t[key] = actionId;
+      saveCustomProfile(name, t);
+    }
+    setMidiProfile(name);
+  }
+  function clearBinding(actionId) {
+    const name = activeName();
+    if (builtin(name)) {
+      const ov = { ...(getProfileOverride(name) || {}) };
+      let changed = false;
+      for (const k in ov) if (ov[k] === actionId) { delete ov[k]; changed = true; }
+      if (changed) { clearProfileOverride(name); mergeProfileOverride(name, ov); setMidiProfile(name); }
+    } else {
+      const t = { ...((loadCustomProfiles()[name]) || {}) };
+      let changed = false;
+      for (const k in t) if (t[k] === actionId) { delete t[k]; changed = true; }
+      if (changed) { saveCustomProfile(name, t); setMidiProfile(name); }
+    }
+  }
+
+  let learning = null; // { actionId, bindEl }
+  function disarm() { learning = null; setMidiLearn(false, null); }
+  function arm(actionId, bindEl) {
+    if (learning) disarm();
+    learning = { actionId, bindEl };
+    bindEl.textContent = 'press a control…';
+    bindEl.style.color = '#fbbf24';
+    setMidiLearn(true, (msg) => {
+      // Show what arrives so colliding directions are visible (diagnoses FX CH select).
+      bindEl.textContent = `ch${msg.channel} ${msg.type === 'cc' ? 'CC' : 'NOTE'} ${msg.data1} =${msg.value}`;
+      if (msg.type === 'note' && msg.value === 0) return; // wait for the press, not release
+      setBinding(learning.actionId, msg);
+      disarm();
+      render();
+    });
+  }
+
+  function render() {
+    const table = currentTable();
+    titleEl.textContent = `MIDI MAP — ${activeName() || '(no profile)'}`;
+    listEl.innerHTML = '';
+    for (const sec of SECTIONS) {
+      const h = document.createElement('div');
+      h.textContent = sec.title;
+      h.style.cssText = 'color:#7c3aed;font-size:9px;font-weight:bold;margin:10px 0 4px;letter-spacing:1.5px;';
+      listEl.appendChild(h);
+      for (const [id, label] of sec.rows) {
+        if (!(id in APP_ACTIONS)) continue;
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-bottom:1px solid #1a1a24;';
+        const name = document.createElement('span');
+        name.textContent = label;
+        name.style.cssText = 'font-size:11px;color:#dcdce6;flex:1;';
+        const bind = document.createElement('span');
+        bind.textContent = bindingLabelFor(id, table);
+        bind.style.cssText = 'font-size:10px;color:#10b981;min-width:104px;text-align:right;font-family:monospace;';
+        const learn = document.createElement('button');
+        learn.textContent = 'learn';
+        learn.style.cssText = 'background:#4c1d95;border:1px solid #7c3aed;color:#ddd6fe;font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer;';
+        learn.addEventListener('click', () => arm(id, bind));
+        const clr = document.createElement('button');
+        clr.textContent = '✕';
+        clr.title = 'Clear this binding';
+        clr.style.cssText = 'background:transparent;border:none;color:#666;font-size:12px;cursor:pointer;padding:0 2px;';
+        clr.addEventListener('click', () => { clearBinding(id); render(); });
+        row.append(name, bind, learn, clr);
+        listEl.appendChild(row);
+      }
+    }
+  }
+
+  let open = false;
+  function show() { panel.style.display = 'block'; open = true; render(); }
+  function hide() { disarm(); panel.style.display = 'none'; open = false; }
+  btnOpen.addEventListener('click', () => (open ? hide() : show()));
+  if (btnClose) btnClose.addEventListener('click', hide);
+  if (btnReset) btnReset.addEventListener('click', () => {
+    const name = activeName();
+    if (builtin(name)) { clearProfileOverride(name); setMidiProfile(name); render(); }
+  });
+  if (btnExport) btnExport.addEventListener('click', () => {
+    const data = { profile: activeName(), mappingTable: currentTable() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'midi-map.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  // Re-render when the active profile changes via the device dropdown.
+  document.getElementById('midi-device')?.addEventListener('change', () => { if (open) render(); });
+
+  window._openMidiMap = show;
+})();
+
+// Legacy no-op kept so older callers/tests don't throw.
+window._midiGuideStepCount = 0;
+
+// ── (removed) Guided MIDI Mapping Wizard ───────────────────────────────────────
+/* eslint-disable */
+(function _deadGuideWizard_unused() {
+  if (true) return; // disabled — replaced by setupMidiMap above
   // ── Step definitions ──────────────────────────────────────────────────────
   // `target` is the APP_ACTIONS action-id this step maps to (or null for steps
   // that only set wizard state, e.g. the FX CH-select switches which we don't
@@ -2478,15 +2673,19 @@ const btnStopB = document.querySelector('#btn-stop-b');
 
 let bpmA = 120.0;
 let bpmB = 120.0;
+// Base BPM = the deck's BPM at tempo slider center (0%). Editable by typing
+// into the BPM display; tempo slider scales around it.
+let baseBpmA = 120.0;
+let baseBpmB = 120.0;
 
 function updateBPM() {
   // Tempo slider range: min=-100, max=100, center=0.
-  // Map full deflection (±100) to ±rangePercent% of 120 BPM.
+  // Map full deflection (±100) to ±rangePercent% of base BPM.
   const rangePercentA = TEMPO_RANGES[tempoRangeIdxA]; // e.g. 10 means ±10%
   const rangePercentB = TEMPO_RANGES[tempoRangeIdxB];
   // slider value is in [-100, 100]; normalise to [-1, 1] then scale by range%.
-  bpmA = 120.0 * (1 - (Number(tempoA.value) / 100) * (rangePercentA / 100));
-  bpmB = 120.0 * (1 - (Number(tempoB.value) / 100) * (rangePercentB / 100));
+  bpmA = baseBpmA * (1 - (Number(tempoA.value) / 100) * (rangePercentA / 100));
+  bpmB = baseBpmB * (1 - (Number(tempoB.value) / 100) * (rangePercentB / 100));
   const labelA = document.getElementById('tempo-range-label-a');
   if (labelA) labelA.textContent = `±${rangePercentA === 100 ? 'WIDE' : rangePercentA + '%'}`;
   const labelB = document.getElementById('tempo-range-label-b');
@@ -2495,6 +2694,38 @@ function updateBPM() {
   bpmDispB.textContent = bpmB.toFixed(1);
 }
 window._updateBPM = updateBPM;
+
+// Allow typing a BPM directly into the display. The typed value becomes the
+// deck's current BPM; we back-solve the base BPM so the tempo slider position
+// is preserved and downstream beat-sync (bpmA/bpmB) uses the new value.
+function setupBpmInput(dispEl, tempoEl, getRangePercent, setBaseBpm) {
+  if (!dispEl) return;
+  const commit = () => {
+    const typed = parseFloat(dispEl.textContent.replace(/[^0-9.]/g, ''));
+    if (isFinite(typed) && typed > 0) {
+      const clamped = Math.min(999, Math.max(20, typed));
+      const factor = 1 - (Number(tempoEl.value) / 100) * (getRangePercent() / 100);
+      // factor near 0 (extreme tempo) would blow up the base; guard it.
+      setBaseBpm(Math.abs(factor) > 0.01 ? clamped / factor : clamped);
+    }
+    updateBPM();          // re-renders display to canonical value
+    triggerRealtimeUpdate();
+  };
+  dispEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); dispEl.blur(); }
+  });
+  dispEl.addEventListener('blur', commit);
+  dispEl.addEventListener('focus', () => {
+    // select all so typing replaces the value
+    const r = document.createRange();
+    r.selectNodeContents(dispEl);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+}
+setupBpmInput(bpmDispA, tempoA, () => TEMPO_RANGES[tempoRangeIdxA], (v) => { baseBpmA = v; });
+setupBpmInput(bpmDispB, tempoB, () => TEMPO_RANGES[tempoRangeIdxB], (v) => { baseBpmB = v; });
 
 /**
  * Cycle the tempo range for a deck (called by Shift button press).
@@ -2526,6 +2757,7 @@ syncA.addEventListener('click', () => {
   syncA.classList.toggle('active');
   if (syncA.classList.contains('active')) {
     tempoA.value = tempoB.value;
+    baseBpmA = baseBpmB;
     updateKnobFill(tempoA);
     updateBPM();
     triggerRealtimeUpdate();
@@ -2536,6 +2768,7 @@ syncB.addEventListener('click', () => {
   syncB.classList.toggle('active');
   if (syncB.classList.contains('active')) {
     tempoB.value = tempoA.value;
+    baseBpmB = baseBpmA;
     updateKnobFill(tempoB);
     updateBPM();
     triggerRealtimeUpdate();
@@ -2907,6 +3140,7 @@ updatePadLabels('b', padModeB);
 updatePadLabels('c', 'hotcue');
 updatePadLabels('d', 'hotcue');
 window._cyclePadMode = cyclePadMode;
+window._setPadMode = setPadMode; // used by MIDI 'padmode' actions (bindable pad-mode buttons)
 
 // Router for physical (MIDI) pads — honours the current pad mode of that deck.
 window._handleDeckPad = (deckStr, index, velocity) => {
@@ -3323,7 +3557,7 @@ function centerCamera() {
   // 1.5x larger framing: persistent framing distance for load, play, and stop alike.
   // DEFAULT_ZOOM_OUT pushes the baseline framing 30% further (object ~30% smaller)
   // so first-load / reset / min-master-volume all sit more zoomed-out than before.
-  const DEFAULT_ZOOM_OUT = 1.3;
+  const DEFAULT_ZOOM_OUT = 1.15;
   const distance = (((targetDist * 1.5) / Math.sin((fov * Math.PI / 180) / 2)) / 3.0) * DEFAULT_ZOOM_OUT;
   baseFramedDistance = distance;
 
@@ -4965,6 +5199,8 @@ async function performRealtimeUpdate() {
 
     let sceneIdx = 0;
 
+    updateEqSmoothing(); // ease EQ band factors once before both deck loops use them
+
     const targetDist = 5.0;
     const globalZ = (now * 0.0002) % (Math.PI * 2);
     const splatMesh = viewer.splatMesh;
@@ -5083,8 +5319,8 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleA).multiply(_scratchQRandom);
       _scratchV.copy(boundsA.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      // Live EQ: outer/mid/inner chunks scaled by HI/MID/LOW knob (0 = cut to nothing).
-      const eqFA = (i < numChunksA) ? eqFactorForChunk(i, numChunksA, eqHiAEl, eqMidAEl, eqLowAEl) : 1.0;
+      // Live EQ: outer/mid/inner chunks scaled by smoothed HI/MID/LOW (0 = cut to nothing).
+      const eqFA = (i < numChunksA) ? eqFactorForChunk(i, numChunksA, eqSmooth.hiA, eqSmooth.midA, eqSmooth.lowA) : 1.0;
       splatScene.scale.setScalar(finalScale * volScaleA * eqFA);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);
@@ -5201,8 +5437,8 @@ async function performRealtimeUpdate() {
       _scratchQ.setFromAxisAngle(_yAxis, angleB).multiply(_scratchQRandom);
       _scratchV.copy(boundsB.center).multiplyScalar(finalScale).applyQuaternion(_scratchQ).negate();
 
-      // Live EQ (deck B).
-      const eqFB = (i < numChunksB) ? eqFactorForChunk(i, numChunksB, eqHiBEl, eqMidBEl, eqLowBEl) : 1.0;
+      // Live EQ (deck B), smoothed.
+      const eqFB = (i < numChunksB) ? eqFactorForChunk(i, numChunksB, eqSmooth.hiB, eqSmooth.midB, eqSmooth.lowB) : 1.0;
       splatScene.scale.setScalar(finalScale * volScaleB * eqFB);
       splatScene.quaternion.copy(_scratchQ);
       splatScene.position.copy(_scratchV);

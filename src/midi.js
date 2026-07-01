@@ -47,6 +47,7 @@ const CHANGE_DEBOUNCE_MS = 200;
 // visuals stop jittering without adding noticeable lag to deliberate moves.
 const _smoothVal = {};    // per-element smoothed 0-127 value
 const _lastApplied = {};  // per-element last value actually written
+const _stepIndex = {};    // per-element last applied integer index (discrete sliders)
 const SMOOTH_ALPHA = 0.35; // 0..1 — higher = more responsive, lower = smoother
 const DEADZONE = 2.5;      // ignore changes smaller than this (in 0-127 units) —
                            // suppresses controller ADC rest-jitter (DDJ faders/knobs)
@@ -76,9 +77,34 @@ function mapSlider(elementId, midiValue) {
 
   const min = parseFloat(el.min) || 0;
   const max = parseFloat(el.max) || 100;
-  // normalized value 0.0 - 1.0
+  const step = parseFloat(el.step) || 0;
   const norm = sm / 127.0;
-  el.value = min + norm * (max - min);
+
+  // Discrete sliders (small integer range, e.g. TRIM → chunk count 0..2) trigger a
+  // heavy rebuild on every 'change'. ADC jitter near a step boundary would flip the
+  // index back and forth and thrash rebuilds. Quantize with hysteresis: only move
+  // to the next index once the smoothed value passes 0.6 of a step beyond current.
+  const range = max - min;
+  if (step === 1 && range > 0 && range <= 8) {
+    const idxFloat = (norm * range);
+    const cur = _stepIndex[elementId];
+    let target = Math.round(idxFloat);
+    if (cur !== undefined && Math.abs(idxFloat - cur) < 0.6) target = cur; // deadband
+    target = Math.max(0, Math.min(range, target));
+    if (cur === target) return;        // no index change → no rebuild
+    _stepIndex[elementId] = target;
+    el.value = min + target;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    if (_changeTimers[elementId]) clearTimeout(_changeTimers[elementId]);
+    _changeTimers[elementId] = setTimeout(() => {
+      delete _changeTimers[elementId];
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, CHANGE_DEBOUNCE_MS);
+    return;
+  }
+
+  // normalized value 0.0 - 1.0
+  el.value = min + norm * range;
 
   // Fire 'input' immediately — updates visuals and lightweight logic.
   el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -289,8 +315,8 @@ const PROFILES = {
         if (cc === 24) mapSlider('filter-b', value);           // Color/Quick filter B
         if (cc === 8)  mapSlider('master-vol', value);         // Master level → zoom        ⚠VERIFY
         if (cc === 12) mapSlider('knob-dof', value);           // Headphone MIX → DOF         ⚠VERIFY
-        if (cc === 13) mapSlider('knob-lensflare', value);     // Headphone LEVEL → Flare     ⚠VERIFY
-        if (cc === 5)  runAction('strobe-3state', value, false); // Mic level → strobe 3-state ⚠VERIFY
+        if (cc === 13) runAction('strobe-3state', value, false); // Headphone CUE LEVEL → strobe 3-state (0 off / mid side / full)
+        if (cc === 5)  mapSlider('knob-lensflare', value);     // Mic level → lens flare      ⚠VERIFY
       }
 
       // ── Beat FX depth (ch4 CC2) → current target deck's FX depth ──
@@ -505,6 +531,28 @@ export const APP_ACTIONS = {
   'loop-in-b':     { kind: 'button', el: 'loop-in-b' },
   'loop-out-b':    { kind: 'button', el: 'loop-out-b' },
 
+  // ── Loop activate/exit (commit toggle) ──
+  'loop-toggle-a': { kind: 'button', el: 'loop-toggle-a' },
+  'loop-toggle-b': { kind: 'button', el: 'loop-toggle-b' },
+
+  // ── Beat-FX channel-select target (which deck the FX section drives) ──
+  'fx-target-a': { kind: 'fxTarget', target: 'a' },
+  'fx-target-b': { kind: 'fxTarget', target: 'b' },
+  'fx-target-m': { kind: 'fxTarget', target: 'm' },
+
+  // ── View / global ──
+  'reset-view': { kind: 'button', el: 'btn-reset-orient' },
+
+  // ── Pad-mode select (per deck) ──
+  'padmode-hotcue-a':   { kind: 'padmode', deck: 'a', mode: 'hotcue' },
+  'padmode-beatloop-a': { kind: 'padmode', deck: 'a', mode: 'beatloop' },
+  'padmode-beatjump-a': { kind: 'padmode', deck: 'a', mode: 'beatjump' },
+  'padmode-sampler-a':  { kind: 'padmode', deck: 'a', mode: 'sampler' },
+  'padmode-hotcue-b':   { kind: 'padmode', deck: 'b', mode: 'hotcue' },
+  'padmode-beatloop-b': { kind: 'padmode', deck: 'b', mode: 'beatloop' },
+  'padmode-beatjump-b': { kind: 'padmode', deck: 'b', mode: 'beatjump' },
+  'padmode-sampler-b':  { kind: 'padmode', deck: 'b', mode: 'sampler' },
+
   // ── Misc buttons ──
   'strobe': { kind: 'button', el: 'btn-strobe' },
 
@@ -584,6 +632,14 @@ function runAction(actionId, value, isNote) {
       if (window._setStrobeState) window._setStrobeState(strobeTarget);
       break;
     }
+    case 'fxTarget':
+      // Beat-FX CH select → which deck ('a'/'b'/'m') the FX section drives.
+      if (value > 0) ddj400FxTarget = action.target;
+      break;
+    case 'padmode':
+      // Pad-mode select → Hot Cue / Beat Loop / Beat Jump / Sampler for a deck.
+      if (value > 0 && window._setPadMode) window._setPadMode(action.deck, action.mode);
+      break;
     default:
       console.warn(`[MIDI] Unknown action kind "${action.kind}" for "${actionId}"`);
   }
