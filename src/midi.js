@@ -4,12 +4,15 @@
 // Supported profiles:
 //   'ddj-400'  — Pioneer DDJ-400
 //   'ddj-flx4' — Pioneer DDJ-FLX4
+//   'idj'      — ICON iDJ
 //
 // MIDI numbers sourced from:
 //   DDJ-400 : mixxxdj/mixxx Pioneer-DDJ-400.midi.xml (derived from official
 //             Pioneer DDJ-400 MIDI Message List E1, pioneerdj.com)
 //   DDJ-FLX4: mixxxdj/mixxx Pioneer-DDJ-FLX4.midi.xml (derived from official
 //             Pioneer DDJ-FLX4 MIDI Message List E1, pioneerdj.com)
+//   iDJ     : ICON's stock VirtualDJ device.xml (iconproaudio.com/product/idj/),
+//             verified against the physical unit (VID_1D03/PID_0027).
 //
 // Channel → Deck convention (same on both controllers):
 //   ch 0 = Deck A, ch 1 = Deck B
@@ -432,6 +435,73 @@ const PROFILES = {
       if (channel === 4) {
         if (cc === 2) mapSlider(`fx-depth-${flx4FxTarget}`, value);
       }
+    },
+  },
+
+  // ── ICON iDJ ────────────────────────────────────────────────────────────────
+  // Source: ICON's own stock VirtualDJ device definition, bundled in the "Setup
+  // procedure illustration - VirtualDJ" download on iconproaudio.com/product/idj/
+  // (Devices/icon idj.xml, vid=0x1D03 pid=0x0027, drivername "iCON idj V1.01").
+  // Verified against the physical unit connected to this machine (matching
+  // VID/PID). Unlike the DDJ pair, both decks share MIDI channel 0 — they're
+  // split by note/CC number instead of channel. Crossfader alone is ch8.
+  // Pitch faders report inverted (min=0x7F at top), so we flip them like the
+  // DDJ-400 tempo fader to keep the "push down = faster" house convention.
+  'idj': {
+    handleNoteOn(channel, note, velocity) {
+      if (channel !== 0) return;
+
+      if (note === 0x46) clickButton('btn-play-a', velocity);
+      if (note === 0x37) clickButton('btn-play-b', velocity);
+      if (note === 0x33) clickButton('btn-stop-a', velocity);  // Cue → Stop
+      if (note === 0x47) clickButton('btn-stop-b', velocity);
+      if (note === 0x65) clickButton('sync-a', velocity);
+      if (note === 0x67) clickButton('sync-b', velocity);
+
+      if (note === 0x34) clickButton('loop-in-a', velocity);
+      if (note === 0x32) clickButton('loop-out-a', velocity);
+      if (note === 0x36) clickButton('loop-in-b', velocity);
+      if (note === 0x38) clickButton('loop-out-b', velocity);
+      if (note === 0x66) clickButton('loop-half-a', velocity);
+      if (note === 0x42) clickButton('loop-double-a', velocity);
+      if (note === 0x68) clickButton('loop-half-b', velocity);
+      if (note === 0x43) clickButton('loop-double-b', velocity);
+
+      if (note === 0x16) clickButton('btn-fx-toggle-a', velocity);
+      if (note === 0x17) clickButton('btn-fx-toggle-b', velocity);
+
+      // Sampler pads (iDJ only exposes one pad per deck — L/R).
+      if (note === 0x4E) triggerPad('a', 0, velocity);
+      if (note === 0x53) triggerPad('b', 0, velocity);
+
+      // Load — same browser limitation as the DDJ profiles: a file dialog
+      // cannot be opened from a MIDI event, needs a real user gesture.
+      if (note === 0x58 || note === 0x5B) console.warn('[MIDI] Load via MIDI not possible (file dialog needs a user gesture); use the on-screen LOAD button.');
+    },
+
+    handleCC(channel, cc, value) {
+      if (channel === 8) {
+        if (cc === 0x08) mapSlider('crossfader', value);
+        return;
+      }
+      if (channel !== 0) return;
+
+      if (cc === 0x0E) mapSlider('tempo-a', 127 - value);  // Pitch fader (inverted, see header note)
+      if (cc === 0x0F) mapSlider('tempo-b', 127 - value);
+      if (cc === 0x0C) mapSlider('vol-a', value);
+      if (cc === 0x0D) mapSlider('vol-b', value);
+      if (cc === 0x1C) mapSlider('trim-a', value);         // Gain → trim
+      if (cc === 0x1D) mapSlider('trim-b', value);
+      if (cc === 0x14) mapSlider('eq-hi-a', value);
+      if (cc === 0x1B) mapSlider('eq-hi-b', value);
+      if (cc === 0x15) mapSlider('eq-mid-a', value);
+      if (cc === 0x19) mapSlider('eq-mid-b', value);
+      if (cc === 0x17) mapSlider('eq-low-a', value);
+      if (cc === 0x18) mapSlider('eq-low-b', value);
+      if (cc === 0x55) mapSlider('filter-a', value);
+      if (cc === 0x57) mapSlider('filter-b', value);
+      if (cc === 0x10) spinJog('jog-a', value, 0.03);
+      if (cc === 0x11) spinJog('jog-b', value, 0.03);
     },
   },
 };
@@ -895,7 +965,7 @@ function getMIDIMessage(message) {
 
 /**
  * Guess the matching built-in profile from a MIDI input's device name.
- * Returns a profile key ('ddj-400' | 'ddj-flx4') or null if unrecognized.
+ * Returns a profile key ('ddj-400' | 'ddj-flx4' | 'idj') or null if unrecognized.
  * FLX4 is checked first so "DDJ-FLX4" never matches the looser "400" test.
  */
 function profileFromDeviceName(name) {
@@ -903,6 +973,7 @@ function profileFromDeviceName(name) {
   const n = name.toUpperCase();
   if (n.includes('FLX4') || n.includes('FLX-4')) return 'ddj-flx4';
   if (n.includes('DDJ-400') || n.includes('DDJ400') || n.includes('400')) return 'ddj-400';
+  if (n.includes('IDJ') || n.includes('ICON')) return 'idj';
   return null;
 }
 
