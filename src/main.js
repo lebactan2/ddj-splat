@@ -1130,6 +1130,10 @@ function stopOutputStream() {
     clearInterval(outputPollInterval);
     outputPollInterval = null;
   }
+  // OUTPUT is gone — no reason to keep drawing (or holding audio) while hidden.
+  stopBgClock();
+  stopBgKeepAlive();
+  bgActiveLogged = false;
   if (btnOutput) {
     btnOutput.textContent = 'OUTPUT →';
     btnOutput.classList.remove('active');
@@ -1272,6 +1276,11 @@ async function toggleOutputWindow() {
     btnOutput.classList.add('active');
   }
 
+  // Keep rendering when this window is minimized (see "Background frame clock").
+  // Started here because the click gives us the user gesture the AudioContext needs.
+  startBgKeepAlive();
+  if (bgClockNeeded()) startBgClock();
+
   // Poll to detect user closing the popup
   outputPollInterval = setInterval(() => {
     if (outputWin && outputWin.closed) {
@@ -1284,6 +1293,162 @@ async function toggleOutputWindow() {
 if (btnOutput) {
   btnOutput.addEventListener('click', toggleOutputWindow);
 }
+
+// ── Background frame clock (keeps OUTPUT alive while this window is minimized) ─
+//
+// The whole render path is requestAnimationFrame-driven: our own loop(), the
+// realtime-update coalescer, and the splat library's internal selfDrivenUpdate.
+// A browser stops firing rAF the moment the document is hidden — minimize the
+// control window and the canvas stops being drawn, so the captureStream track
+// stops producing frames and the OUTPUT window freezes on its last picture.
+//
+// Fix: when OUTPUT is open AND this document is hidden, drive the frame from a
+// Web Worker interval instead of rAF. WebGL draw calls still execute for a
+// hidden page (they just aren't composited to this window's screen), which is
+// all captureStream needs. Two supporting details:
+//   - We call viewer.update()/viewer.render() ourselves rather than the
+//     library's selfDrivenUpdate(), because that method re-arms its own rAF;
+//     while hidden those callbacks would pile up and all fire at once on
+//     restore. Its rAF chain is simply parked until the window comes back.
+//   - Chrome throttles timers (including worker timers) in hidden pages, but
+//     exempts pages that are playing audio. We hold an inaudible WebAudio tone
+//     open for as long as OUTPUT is on so the tick keeps its full rate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BG_FRAME_MS = 1000 / 60;   // target rate while minimized
+let bgWorker = null;             // Worker posting the ticks
+let bgQueue = [];                // frame callbacks waiting for the next tick
+let bgQueueSeq = 0;              // id counter (negative ids = background frames)
+let bgKeepAliveCtx = null;       // AudioContext holding the silent tone
+let bgActiveLogged = false;
+
+/** True when the frame should come from the worker clock instead of rAF. */
+function bgClockNeeded() {
+  return !!(outputWin && !outputWin.closed && document.visibilityState !== 'visible');
+}
+
+let bgTickCount = 0;             // test/diagnostic counter
+
+/** One background tick: run queued frame callbacks, then draw. */
+function bgTick() {
+  bgTickCount++;
+  const due = bgQueue;
+  bgQueue = [];
+  const now = performance.now();
+  for (const entry of due) {
+    try { entry.cb(now); } catch (e) { console.error('[OUTPUT] background frame error:', e); }
+  }
+  // The library's own loop is parked while hidden — draw in its place so the
+  // captured canvas keeps producing frames for the OUTPUT window.
+  if (viewer) {
+    try {
+      viewer.update();
+      viewer.render();
+    } catch (e) { /* viewer mid-rebuild / not ready — skip this frame */ }
+  }
+}
+
+function startBgClock() {
+  if (bgWorker) return;
+  try {
+    const src = 'let id=null;onmessage=function(e){if(id){clearInterval(id);id=null;}' +
+                'if(e.data>0){id=setInterval(function(){postMessage(0);},e.data);}};';
+    const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+    bgWorker = new Worker(url);
+    URL.revokeObjectURL(url);
+    bgWorker.onmessage = bgTick;
+    bgWorker.postMessage(BG_FRAME_MS);
+  } catch (e) {
+    console.warn('[OUTPUT] background clock unavailable, falling back to rAF:', e);
+    bgWorker = null;
+  }
+}
+
+function stopBgClock() {
+  if (!bgWorker) return;
+  try { bgWorker.postMessage(0); bgWorker.terminate(); } catch (e) { /* ignore */ }
+  bgWorker = null;
+  // Anything still queued goes back to rAF so no frame callback is dropped.
+  const stranded = bgQueue;
+  bgQueue = [];
+  for (const entry of stranded) requestAnimationFrame(entry.cb);
+}
+
+/** Inaudible tone → the page counts as "playing audio" and dodges throttling. */
+function startBgKeepAlive() {
+  if (bgKeepAliveCtx) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0015; // below the noise floor, but real audio output
+    osc.frequency.value = 30;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    ctx.resume().catch(() => {});
+    bgKeepAliveCtx = ctx;
+  } catch (e) {
+    console.warn('[OUTPUT] keep-alive tone failed:', e);
+  }
+}
+
+function stopBgKeepAlive() {
+  if (!bgKeepAliveCtx) return;
+  try { bgKeepAliveCtx.close(); } catch (e) { /* ignore */ }
+  bgKeepAliveCtx = null;
+}
+
+/**
+ * requestAnimationFrame replacement that survives a minimized window.
+ * Returns a positive rAF id, or a negative id for a background-clock frame.
+ */
+function scheduleFrame(cb) {
+  if (bgClockNeeded()) {
+    startBgClock();
+    if (bgWorker) {
+      if (!bgActiveLogged) { console.log('[OUTPUT] window hidden — driving frames from the background clock'); bgActiveLogged = true; }
+      const id = -(++bgQueueSeq);
+      bgQueue.push({ id, cb });
+      return id;
+    }
+  }
+  return requestAnimationFrame(cb);
+}
+
+/** cancelAnimationFrame counterpart for scheduleFrame ids. */
+function cancelFrame(id) {
+  if (id === null || id === undefined) return;
+  if (id < 0) {
+    bgQueue = bgQueue.filter(e => e.id !== id);
+    return;
+  }
+  cancelAnimationFrame(id);
+}
+
+// Diagnostic hook (also used by the headless smoke test): reports whether the
+// background clock is live and how many ticks it has delivered.
+window._bgClockStats = () => ({
+  needed:    bgClockNeeded(),
+  worker:    !!bgWorker,
+  ticks:     bgTickCount,
+  queued:    bgQueue.length,
+  keepAlive: !!bgKeepAliveCtx,
+});
+
+// Hand the clock back to rAF as soon as the window is visible again.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    stopBgClock();
+    bgActiveLogged = false;
+    // The library's parked rAF chain restarts itself; nudge a redraw so the
+    // first visible frame is current.
+    if (viewer && typeof viewer.forceRenderNextFrame === 'function') viewer.forceRenderNextFrame();
+  } else if (bgClockNeeded()) {
+    startBgClock();
+  }
+});
 
 function reconnectOutputStream() {
   if (!outputWin || outputWin.closed) return;
@@ -3557,9 +3722,11 @@ function startAnimationLoop() {
       triggerRealtimeUpdate();
     }
 
-    animationFrameId = requestAnimationFrame(loop);
+    // scheduleFrame, not rAF: falls back to the worker clock so the loop keeps
+    // ticking (and OUTPUT keeps moving) while this window is minimized.
+    animationFrameId = scheduleFrame(loop);
   };
-  animationFrameId = requestAnimationFrame(loop);
+  animationFrameId = scheduleFrame(loop);
 }
 
 function stopAnimationLoop() {
@@ -3568,7 +3735,7 @@ function stopAnimationLoop() {
       (!fxEngagedB || (fxActiveB !== 'flanger' && fxActiveB !== 'trans')) &&
       (!fxEngagedM || (fxActiveM !== 'flanger' && fxActiveM !== 'trans'))) {
     if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
+      cancelFrame(animationFrameId);
       animationFrameId = null;
     }
     
@@ -4992,7 +5159,7 @@ function triggerRealtimeUpdate() {
     return;
   }
   updateInProgress = true;
-  requestAnimationFrame(async () => {
+  scheduleFrame(async () => {
     try {
       await performRealtimeUpdate();
     } catch (err) {
@@ -5019,7 +5186,7 @@ function pseudoRandom(seed, index) {
 
 async function performRealtimeUpdate() {
   if (!viewer) {
-    requestAnimationFrame(performRealtimeUpdate);
+    scheduleFrame(performRealtimeUpdate);
     return;
   }
 
