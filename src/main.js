@@ -4195,7 +4195,6 @@ function setupPostProcessingAndLensFlare() {
 
       const keys = loadedDeckKeys();
       const mesh = viewer.splatMesh;
-      const sceneCount = mesh ? mesh.getSceneCount() : 0;
 
       // Helper: drive the screen-space strobe overlay (full-screen) once.
       const renderStrobe = () => {
@@ -4220,6 +4219,11 @@ function setupPostProcessingAndLensFlare() {
         if (mesh && mesh.material && mesh.material.uniforms.uStrobeAlphaA) {
           mesh.material.uniforms.uStrobeAlphaA.value = strobeAlphaBaseA;
           mesh.material.uniforms.uStrobeAlphaB.value = strobeAlphaBaseB;
+          // No per-deck isolation needed here — open the gate.
+          if (mesh.material.uniforms.uPassRangeEnd) {
+            mesh.material.uniforms.uPassRangeStart.value = 0.0;
+            mesh.material.uniforms.uPassRangeEnd.value = 0.0;
+          }
         }
         if (viewer.threeScene) renderer.render(viewer.threeScene, viewer.camera);
         renderStrobe();
@@ -4259,23 +4263,15 @@ function setupPostProcessingAndLensFlare() {
       const fullAspect = W / Math.max(1, H);
       const ranges = deckSceneRanges();
 
-      // Save current per-scene visibility so we can restore after the loop.
-      const savedVis = [];
-      for (let i = 0; i < sceneCount; i++) {
-        const s = viewer.getSplatScene(i);
-        savedVis.push(s ? s.visible : false);
-      }
-
-      const setDeckVisible = (deckKey) => {
+      // Per-deck isolation is done in the shader (uPassRangeStart/End), NOT via
+      // SplatScene.visible: the library only consults that flag for raycasting,
+      // so toggling it here left every deck in the draw and the crossfader could
+      // merely dim the pile instead of swapping decks.
+      const setPassDeck = (deckKey) => {
+        if (!matUniforms || !matUniforms.uPassRangeEnd) return;
         const [start, count] = ranges[deckKey];
-        for (let i = 0; i < sceneCount; i++) {
-          const s = viewer.getSplatScene(i);
-          if (!s) continue;
-          const inDeck = (i >= start && i < start + count);
-          // Honour the per-frame intended visibility (savedVis) only inside this
-          // deck's block; everything else is hidden for this sub-render.
-          s.visible = inDeck ? savedVis[i] : false;
-        }
+        matUniforms.uPassRangeStart.value = start;
+        matUniforms.uPassRangeEnd.value = start + count;
       };
 
       // Full buffer for all draws (no scissor panels). The render target's own
@@ -4359,15 +4355,16 @@ function setupPostProcessingAndLensFlare() {
               matUniforms.uStrobeAlphaB.value = strobeAlphaBaseB;
             }
           }
-          setDeckVisible(k);
+          setPassDeck(k);
           renderer.render(mesh, cam);
         }
       }
 
-      // Restore original visibility.
-      for (let i = 0; i < sceneCount; i++) {
-        const s = viewer.getSplatScene(i);
-        if (s) s.visible = savedVis[i];
+      // Re-open the gate so anything drawing the mesh outside this pass (or the
+      // single-deck path on the next frame) isn't left with one deck masked.
+      if (matUniforms && matUniforms.uPassRangeEnd) {
+        matUniforms.uPassRangeStart.value = 0.0;
+        matUniforms.uPassRangeEnd.value = 0.0;
       }
 
       renderer.autoClear = true;
@@ -4564,6 +4561,15 @@ async function rebuildViewerBuffers() {
           uniform float uStrobeAlphaA;
           uniform float uStrobeAlphaB;
 
+          // Per-pass deck gate. The multi-deck overlay renders the shared splat
+          // mesh once per deck (each with its own camera), so every pass must
+          // draw ONLY that deck's scenes. Scene.visible cannot do this — the
+          // library consults it for raycasting only, never for drawing — so the
+          // pass hands us the deck's scene range and everything outside it is
+          // dropped here. uPassRangeEnd <= uPassRangeStart disables the gate.
+          uniform float uPassRangeStart;
+          uniform float uPassRangeEnd;
+
           uniform float uDofFocus;
           uniform float uDofAmount;
           varying float vOpacityMult;
@@ -4671,6 +4677,15 @@ async function rebuildViewerBuffers() {
               vOpacityMult = uStrobeAlphaB;
           }
 
+          // Deck gate: outside this pass's scene range → fully transparent, and
+          // the fragment shader discards it.
+          if (uPassRangeEnd > uPassRangeStart) {
+              float passIdx = float(sceneIndex);
+              if (passIdx < uPassRangeStart || passIdx >= uPassRangeEnd) {
+                  vOpacityMult = 0.0;
+              }
+          }
+
           // #8 Chunk-range loop tint: set vLoopTint=1.0 when this splat's scene is in the looped range.
           // sceneIndex is uint; compare as float after casting.
           vLoopTint = 0.0;
@@ -4702,6 +4717,9 @@ async function rebuildViewerBuffers() {
         viewer.splatMesh.material.vertexShader = shader;
         viewer.splatMesh.material.uniforms.uFxTime = { value: 0 };
         viewer.splatMesh.material.uniforms.uDeckAChunkCount = { value: 0 };
+        // Deck gate, disabled by default (end <= start) → every scene draws.
+        viewer.splatMesh.material.uniforms.uPassRangeStart = { value: 0.0 };
+        viewer.splatMesh.material.uniforms.uPassRangeEnd   = { value: 0.0 };
         
         viewer.splatMesh.material.uniforms.uFxFlangerAmountA = { value: 0 };
         viewer.splatMesh.material.uniforms.uFxPhaserAmountA = { value: 0 };
