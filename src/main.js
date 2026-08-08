@@ -668,6 +668,7 @@ appDiv.innerHTML = `
         <select id="midi-device" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
           <option value="ddj-400">DDJ-400</option>
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
+          <option value="ddj-200">DDJ-200</option>
           <option value="idj">iCON iDJ</option>
         </select>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">MIDI MAP</button>
@@ -1710,6 +1711,7 @@ document.getElementById('hdri-select')?.addEventListener('change', (e) => {
 const BUILTIN_MIDI_PROFILES = [
   { value: 'ddj-400',  label: 'DDJ-400' },
   { value: 'ddj-flx4', label: 'DDJ-FLX4' },
+  { value: 'ddj-200',  label: 'DDJ-200' },
   { value: 'idj',      label: 'iCON iDJ' },
 ];
 

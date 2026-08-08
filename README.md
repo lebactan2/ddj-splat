@@ -2,8 +2,8 @@
 
 A browser-based **VJ tool for 3D Gaussian Splats** — load splats onto decks, mix
 them like a DJ controller, and drive beat-synced visual FX live. Supports
-Pioneer DDJ-400 / DDJ-FLX4 and arbitrary MIDI controllers via a custom mapping
-wizard, with output to a second screen.
+Pioneer DDJ-400 / DDJ-FLX4 / DDJ-200, the ICON iDJ, and arbitrary MIDI
+controllers via a custom mapping wizard, with output to a second screen.
 
 **Live:** https://lebactan2.github.io/ddj-splat/
 
@@ -13,8 +13,8 @@ wizard, with output to a second screen.
 - WebGL strobe layer rendered between the HDRI environment and the splats
 - HDRI environments + (optional) Google Map background
 - Adaptive resolution scaling for FPS under heavy zoom/overdraw
-- Web MIDI: built-in DDJ-400 / DDJ-FLX4 profiles + a **Guided Map** wizard to
-  map and save a custom profile for *any* controller
+- Web MIDI: built-in DDJ-400 / DDJ-FLX4 / DDJ-200 / iCON iDJ profiles + a
+  **Guided Map** wizard to map and save a custom profile for *any* controller
 - Second-screen output (mirrors the render to a fullscreen window)
 
 ## Develop
