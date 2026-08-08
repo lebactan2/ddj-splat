@@ -72,13 +72,21 @@ function mapSlider(elementId, midiValue) {
   const el = document.getElementById(elementId);
   if (!el) return;
 
-  // Smooth the raw value (exponential) to kill ADC jitter.
+  // Rails: a fader parked at either end MUST land exactly on the slider's min or
+  // max. Exponential smoothing only converges asymptotically and the deadzone
+  // then freezes it ~2 units short, so without this the crossfader stops around
+  // 2/100 and the "faded out" deck keeps ~0.02 opacity — it never fully leaves
+  // the screen. Snap on the raw 0/127 rail and bypass smoothing + deadzone.
+  const atRail = (midiValue <= 0 || midiValue >= 127);
   const prev = _smoothVal[elementId];
-  const sm = (prev === undefined) ? midiValue : prev + (midiValue - prev) * SMOOTH_ALPHA;
+  const sm = atRail
+    ? midiValue
+    : ((prev === undefined) ? midiValue : prev + (midiValue - prev) * SMOOTH_ALPHA);
   _smoothVal[elementId] = sm;
   // Deadzone: ignore sub-threshold wiggle so the visuals don't flicker at rest.
   const last = _lastApplied[elementId];
-  if (last !== undefined && Math.abs(sm - last) < DEADZONE) return;
+  if (!atRail && last !== undefined && Math.abs(sm - last) < DEADZONE) return;
+  if (atRail && last === sm) return; // already railed — nothing to re-dispatch
   _lastApplied[elementId] = sm;
 
   const min = parseFloat(el.min) || 0;
