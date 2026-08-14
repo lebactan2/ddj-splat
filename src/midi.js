@@ -27,6 +27,8 @@
 //   ch 4 = Beat FX section
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { HYDRA_PARAMS } from './fx/hydra.js';
+
 // ── MIDI-Learn state ─────────────────────────────────────────────────────────
 
 let midiLearnEnabled = false;
@@ -958,6 +960,13 @@ export const APP_ACTIONS = {
 
   // ── HDRI environment scrub ──
   'hdri': { kind: 'selectScrub', el: 'hdri-select' },
+
+  // ── hydra screen-FX bank (src/fx/hydra.js) — one action per op ──
+  // These are plain sliders: the knob element is the source of truth, and
+  // main.js listens to it, so a MIDI move and a mouse drag take the same path.
+  ...Object.fromEntries(HYDRA_PARAMS.map((p) => [
+    `hydra-${p.name}`, { kind: 'slider', el: `hydra-${p.name}` },
+  ])),
 
   // ── Performance pads (8 per deck) — physical hot-cue pads stay LOOPS ──
   ...buildPadActions('a'),

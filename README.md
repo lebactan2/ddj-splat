@@ -134,6 +134,37 @@ stay on-screen. Every button, pot and encoder on the board is already mapped, so
 re-mapping with **MIDI MAP** trades one function for another rather than filling
 a gap. There is no MIDI output on this controller, so no LED feedback.
 
+## Hydra screen FX
+
+A [hydra](https://hydra.ojack.xyz)-flavoured bank of 2D ops on the finished
+frame, ported from the mesh-sequencer project (`src/fx/hydra.js`). Eight knobs on
+the master strip, left to right in chain order:
+
+| Knob | Op |
+| --- | --- |
+| KALEI | kaleidoscope — folds the frame into 2..12 mirrored wedges |
+| REPT | repeat — tiles the frame into a grid |
+| SCRL | scroll — drifts the frame, speed rising with the knob |
+| MODUL | modulate — warps the frame with a moving sine field |
+| PIXEL | pixelate — quantizes to a coarse grid |
+| COLOR | colorama — rotates hue by brightness |
+| POST | posterize — crushes to few brightness levels |
+| THRSH | threshold — hard cut to black and white |
+
+Where the deck FX bend splat chunks in 3D, these work on the rendered picture, so
+they sit at the end of the composer with both decks already mixed into what they
+fold and recolour. Geometry ops bend the coordinate first, then the sample is
+colour-processed — hydra's own idiom.
+
+It is one shader pass with a uniform per op rather than a pass per op, and the
+pass disables itself while every knob is at zero, so an untouched bank costs
+nothing. Each op is a mappable action (`hydra-kaleid`, `hydra-repeat`, …), so
+MIDI, keyboard and gamepad reach them like any other control and the hover hints
+report their bindings.
+
+The original's `slit` op is not ported: it needs frame history and the camera's
+screen-space axis, and lives in a separate pass there.
+
 ## ADVANCED menu
 
 Set-up-time controls — deck layout (2 / 4 decks), REMOVE BG, SOLID MESH, COLAB
@@ -165,6 +196,8 @@ roles (physical pad → loop, shifted pad → camera preset) labelled separately
 ## Features
 - Multi-deck Gaussian-splat mixing with an equal-power crossfader
 - Beat-synced FX (roll, spiral, reverb, filter, flanger, phaser, trans, …)
+- Hydra-style screen FX bank on the master bus (kaleid, repeat, scroll,
+  modulate, pixelate, colorama, posterize, threshold)
 - WebGL strobe layer rendered between the HDRI environment and the splats
 - HDRI environments + (optional) Google Map background
 - Adaptive resolution scaling for FPS under heavy zoom/overdraw

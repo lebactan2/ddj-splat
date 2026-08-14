@@ -8,6 +8,7 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres, chunkIdForPoint } from './cutup/xyz_shuffle.js';
+import { HydraShader, HYDRA_PARAMS, hydraUniformName } from './fx/hydra.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff, buildProfileMidiMap, formatBinding, appControlKey } from './midi.js';
 import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
 import { initKeyboard, setKeyboardLearn, setKeyboardBinding, clearKeyboardBinding, getKeyboardBindingLabel, getKeyboardBindings } from './keyboard.js';
@@ -74,7 +75,13 @@ window.makeViewer = makeViewer;
 let composer = null;
 let bokehPass = null;
 let afterimagePass = null;
+let hydraPass = null;
 let lensflareLight = null;
+
+// hydra screen-FX bank (src/fx/hydra.js): one amount per op, 0 = bypassed.
+// Held here rather than read off the DOM so the values survive a viewer rebuild,
+// which throws the composer (and the pass) away and makes a new one.
+const hydraAmounts = Object.fromEntries(HYDRA_PARAMS.map((p) => [p.name, 0]));
 
 // WebGL screen-space strobe overlay (rendered between HDRI background and splats).
 // Built lazily in setupPostProcessingAndLensFlare; driven by uniforms in performRealtimeUpdate.
@@ -1541,6 +1548,16 @@ appDiv.innerHTML = `
           </select>
         </div>
         <div class="flex-row" style="align-items:center; gap:3px;">
+          <span class="knob-label">HYDRA</span>
+          <div class="flex-row" id="hydra-bank" style="gap:6px; align-items:center;">
+            ${HYDRA_PARAMS.map((p) => `
+            <div class="knob-cell" title="${p.title}">
+              <input type="range" min="0" max="100" value="0" class="knob knob-small" id="hydra-${p.name}">
+              <span class="knob-label" style="font-size:8px;">${p.label}</span>
+            </div>`).join('')}
+          </div>
+        </div>
+        <div class="flex-row" style="align-items:center; gap:3px;">
           <span class="knob-label">HDRI</span>
           <select id="hdri-select" style="background:#111; border:1px solid #333; color:#fff; font-size:9px; padding:2px 3px; border-radius:4px; cursor:pointer;">
             <option value="none">NONE</option><option value="sunset">SUNSET</option><option value="studio">STUDIO</option>
@@ -2742,6 +2759,43 @@ window.addEventListener('midi-profile-autodetected', (e) => {
   }
 });
 
+// ── hydra screen-FX bank ──────────────────────────────────────────────────────
+// Ported from the mesh-sequencer project (src/fx/hydra.js). One knob per op on
+// the master strip; the whole pass switches off while every knob is at zero, so
+// an untouched bank costs nothing.
+
+/** Push the cached amounts into the pass and enable/disable it accordingly. */
+function syncHydraPassFromKnobs() {
+  if (!hydraPass) return;
+  let any = false;
+  for (const p of HYDRA_PARAMS) {
+    const amount = hydraAmounts[p.name] || 0;
+    const u = hydraPass.uniforms[hydraUniformName(p.name)];
+    if (u) u.value = amount;
+    if (amount > 0.005) any = true;
+  }
+  hydraPass.enabled = any;
+}
+
+/** Set one op's amount (0-1). Called by the knobs and by the MIDI actions. */
+function setHydraAmount(name, value01) {
+  if (!(name in hydraAmounts)) return;
+  hydraAmounts[name] = Math.max(0, Math.min(1, Number.isFinite(value01) ? value01 : 0));
+  syncHydraPassFromKnobs();
+}
+window._setHydraAmount = setHydraAmount;                    // test hook
+window._hydraAmounts = () => ({ ...hydraAmounts });         // test hook
+window._hydraPassEnabled = () => !!(hydraPass && hydraPass.enabled);
+
+for (const p of HYDRA_PARAMS) {
+  const el = document.getElementById(`hydra-${p.name}`);
+  if (!el) continue;
+  el.addEventListener('input', () => {
+    updateKnobFill(el);
+    setHydraAmount(p.name, Number(el.value) / 100);
+  });
+}
+
 // ── ADVANCED menu ─────────────────────────────────────────────────────────────
 // Deck layout, background removal, solid-mesh, the Colab pair and EXPORT are all
 // set-up-time controls, so they sit in a dropdown instead of the header strip.
@@ -3172,6 +3226,7 @@ window._buildTableFromImport = buildTableFromImport;
       ['jog-a', 'Jog A'], ['jog-b', 'Jog B'],
       ['jog-a-encoder', 'Jog A (DIY encoder)'], ['jog-b-encoder', 'Jog B (DIY encoder)'],
       ['knob-dof', 'DOF'], ['knob-lensflare', 'Lens Flare'], ['hdri', 'HDRI scrub'],
+      ...HYDRA_PARAMS.map((p) => [`hydra-${p.name}`, `Hydra ${p.label}`]),
       ['strobe', 'Strobe toggle'], ['strobe-3state', 'Strobe 3-state (knob)'],
     ]},
   ];
@@ -5413,6 +5468,14 @@ function setupPostProcessingAndLensFlare() {
   afterimagePass.uniforms['scale'].value = 1.0;
   composer.addPass(afterimagePass);
 
+  // hydra bank: 2D ops on the finished frame, so both decks and every deck FX
+  // are already composited into what it folds/tiles/recolours. Stays disabled
+  // until a knob leaves zero (see setHydraAmount).
+  hydraPass = new ShaderPass(HydraShader);
+  hydraPass.enabled = false;
+  composer.addPass(hydraPass);
+  syncHydraPassFromKnobs();
+
   // Final pass: copy the last buffer to screen
   const copyPass = new ShaderPass(CopyShader);
   copyPass.renderToScreen = true;
@@ -5420,6 +5483,11 @@ function setupPostProcessingAndLensFlare() {
   composer.addPass(copyPass);
 
   viewer.render = function() {
+    // scroll / modulate animate off wall-clock time; aspect keeps wedges square
+    if (hydraPass && hydraPass.enabled) {
+      hydraPass.uniforms.uTime.value = performance.now() * 0.001;
+      hydraPass.uniforms.uAspect.value = window.innerWidth / Math.max(1, window.innerHeight);
+    }
     composer.render();
     // The renderPass may have detected a change in actively-rendered deck count
     // and flagged a render-scale update. Apply it here, AFTER the composer pass,
