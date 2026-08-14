@@ -117,7 +117,7 @@ export function sliceIntoSpheres(splatData, numChunks = 32) {
   const rawChunks = chunks
     .map((buf, idx) => ({ buf, idx }))
     .filter(({ buf }) => buf.length > 0)
-    .map(({ buf }) => {
+    .map(({ buf, idx }) => {
       const sd = new SplatData(buf);
       // Compute centroid of this chunk relative to overall center
       const cview = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -135,7 +135,7 @@ export function sliceIntoSpheres(splatData, numChunks = 32) {
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // Clockwise angle: negate atan2 so increasing angle goes clockwise (when viewed from above)
       const angle = -Math.atan2(dz, dx);
-      return { sd, dist, angle };
+      return { sd, dist, angle, idx };
     });
 
   // Sort: outer first (dist descending), then clockwise (angle ascending after negation)
@@ -144,5 +144,34 @@ export function sliceIntoSpheres(splatData, numChunks = 32) {
     return a.angle - b.angle; // clockwise within same ring
   });
 
-  return rawChunks.map(r => r.sd);
+  const ordered = rawChunks.map(r => r.sd);
+  // Expose how the cut was made so other representations of the same object —
+  // notably a solid mesh on the same deck — can be cut into matching chunks:
+  // `shapes` are the containment volumes, `order` maps each returned chunk back
+  // to the shape index it came from (chunk 0 of `shapes` is the "outside
+  // everything" background).
+  ordered.meta = { shapes, order: rawChunks.map(r => r.idx), center: { x: cx, y: cy, z: cz } };
+  return ordered;
+}
+
+/**
+ * Chunk id for a point under a given slice, matching the assignment loop above.
+ * @param {{shapes: Array}} meta  the `meta` attached to a sliceIntoSpheres result
+ */
+export function chunkIdForPoint(meta, px, py, pz) {
+  const shapes = meta.shapes;
+  for (let c = 1; c < shapes.length; c++) {
+    const shape = shapes[c];
+    const dx = px - shape.x;
+    const dy = py - shape.y;
+    const dz = pz - shape.z;
+    if (shape.type === 0) {
+      if (dx * dx + dy * dy + dz * dz <= shape.size * shape.size) return c;
+    } else if (shape.type === 1) {
+      if (Math.abs(dx) <= shape.size && Math.abs(dy) <= shape.size && Math.abs(dz) <= shape.size) return c;
+    } else {
+      if (dx * dx + dz * dz <= shape.size * shape.size && Math.abs(dy) <= shape.size) return c;
+    }
+  }
+  return 0;
 }

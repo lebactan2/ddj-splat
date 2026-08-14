@@ -1,11 +1,13 @@
 import './style.css';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 import { SplatData, limitSplatCount } from './dataModel.js';
-import { decodeSog } from './sogLoader.js';
+import { decodeSog, decodeSogFromFiles, looksLikeUnbundledSog } from './sogLoader.js';
+import { decodeSpz } from './spzLoader.js';
+import { loadMeshObject, sampleObjectToSplatBytes, sliceObjectIntoChunkGroups, isMeshFile, MESH_EXTS } from './meshLoader.js';
 import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
-import { sliceIntoSpheres } from './cutup/xyz_shuffle.js';
+import { sliceIntoSpheres, chunkIdForPoint } from './cutup/xyz_shuffle.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
 import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
 import { initKeyboard, setKeyboardLearn, setKeyboardBinding, clearKeyboardBinding, getKeyboardBindingLabel, getKeyboardBindings } from './keyboard.js';
@@ -22,6 +24,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CopyShader } from 'three/examples/jsm/shaders/CopyShader.js';
 import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
 import { AfterimageShader } from 'three/examples/jsm/shaders/AfterimageShader.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 // Patch AfterimageShader to support 'scale' for echoing down
 AfterimageShader.uniforms['scale'] = { value: 1.0 };
@@ -128,6 +131,30 @@ let boundsA = { center: new THREE.Vector3(), maxDist: 5 };
 let boundsB = { center: new THREE.Vector3(), maxDist: 5 };
 let boundsC = { center: new THREE.Vector3(), maxDist: 5 };
 let boundsD = { center: new THREE.Vector3(), maxDist: 5 };
+// ── Solid-mesh decks ────────────────────────────────────────────────────────
+// A deck loaded from .obj/.fbx/.usdz/.gltf/.glb keeps the real triangle mesh
+// here and renders it as ordinary lit geometry. The deck still holds a splat
+// cloud sampled from that mesh — every deck control (bounds, chunking, jog,
+// crossfade, FX) is written against splat scenes — but in SOLID mode the splat
+// draw is skipped for that deck and the mesh is drawn in its place, following
+// chunk 0's transform so jog/play/volume still move it.
+// Switching to SPLAT mode re-samples the cached mesh at full density.
+const deckMeshes = { a: null, b: null, c: null, d: null };
+window.__deckMeshes = deckMeshes; // test hook: inspect solid-mesh decks
+window.__meshFxUniforms = (mat) => meshFxState.get(mat)?.own; // test hook
+window.__deckDebug = () => ({ boundsA: { maxDist: boundsA.maxDist, center: boundsA.center.toArray() },
+  splatsA: sceneA ? sceneA.splatCount : 0, chunksA: numChunksA, rollA: numRollChunksA });
+// The deck frames a scene by normalizing its bounding-sphere radius to
+// targetDist, which suits a capture — those carry stray outlier splats, so the
+// subject itself lands comfortably inside the frame. A mesh fills its bounding
+// sphere exactly and would overflow, so mesh decks get this extra fit factor.
+// It multiplies the deck scale, so the splat proxy and the solid mesh shrink
+// together and stay aligned.
+const MESH_FRAME_FIT = 0.62;
+const MESH_PROXY_SAMPLES = 20000;   // solid mode: enough for bounds + chunking
+const MESH_SPLAT_SAMPLES = 300000;  // splat mode: what actually gets rendered
+let solidMeshMode = true;
+
 let currentScalesA = new Float32Array(32).fill(0);
 let currentScalesB = new Float32Array(32).fill(0);
 let currentScalesC = new Float32Array(32).fill(0);
@@ -337,6 +364,720 @@ function loadedDeckKeys() {
   return out;
 }
 
+// ── Solid-mesh deck helpers ─────────────────────────────────────────────────
+// Each deck's mesh lives in its own group, drawn with that deck's camera inside
+// the render pass. The group carries its own lights: it is rendered on its own
+// (not as part of viewer.threeScene), so scene-level lighting would not reach it.
+function buildDeckMeshGroup(object) {
+  const group = new THREE.Scene();
+  group.matrixAutoUpdate = true;
+
+  // The environment map carries most of the base illumination, so these lights
+  // only add directional shaping — turn them up and untextured white assets
+  // blow out to a flat silhouette.
+  const key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(3, 5, 4);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+  fill.position.set(-4, 1, -3);
+  const ambient = new THREE.HemisphereLight(0xffffff, 0x202028, 0.4);
+  group.add(key, fill, ambient);
+
+  // `object` is not added directly: the deck renders it as chunk groups built
+  // by rebuildDeckMeshChunks(), which mirror the splat slicing.
+  prepareDeckMeshMaterials(object);
+  applyHdriEnvToObject(object);
+  return group;
+}
+
+// The render pass draws into the composer's render target, and three only
+// applies the output colour-space conversion when drawing to the canvas. Splats
+// are unaffected (their shader already writes display-space colour), but a lit
+// PBR material writes linear light and would come out near-black. Encode it
+// here, at the end of the fragment shader, so meshes match the splat pipeline.
+const SRGB_ENCODE_SNIPPET = `
+  gl_FragColor.rgb = mix(
+    gl_FragColor.rgb * 12.92,
+    pow(max(gl_FragColor.rgb, vec3(0.0)), vec3(0.41666)) * 1.055 - 0.055,
+    step(vec3(0.0031308), gl_FragColor.rgb)
+  );
+`;
+
+// The deck FX that live in the splat shader — flanger, phaser, pitch
+// squash/stretch, the filter's size fader, the pitch colour shift and the
+// chunk-loop tint — are mirrored here so a solid mesh reacts to the same knobs
+// on the same beat. The mesh materials borrow the splat material's uniform
+// OBJECTS, so whatever drives the splats each frame drives the mesh too, with
+// nothing to keep in sync.
+const MESH_FX_VERTEX_DECL = `
+  uniform float uFxTime;
+  uniform float uVvjIsDeckA;
+  uniform float uFxFlangerAmountA, uFxPhaserAmountA, uFxBeatFreqA;
+  uniform float uFxPitchSquashXA, uFxPitchStretchYA, uFxPitchSquashYA, uFxPitchStretchXA;
+  uniform float uFxFlangerAmountB, uFxPhaserAmountB, uFxBeatFreqB;
+  uniform float uFxPitchSquashXB, uFxPitchStretchYB, uFxPitchSquashYB, uFxPitchStretchXB;
+  uniform float uFxFlangerAmountM, uFxPhaserAmountM, uFxBeatFreqM;
+  uniform float uFxPitchSquashXM, uFxPitchStretchYM, uFxPitchSquashYM, uFxPitchStretchXM;
+  uniform float uFaderScaleA, uFaderScaleB;
+  uniform float uVvjFilterAmount;
+  uniform vec3 uVvjFilterBands;
+  uniform vec3 uVvjBoundsCenter;
+  uniform vec3 uVvjBoundsSize;
+  uniform float uVvjGhostFade;
+  varying float vVvjBandLevel;
+`;
+
+// Same displacement maths as the splat vertex shader, applied to the vertex
+// instead of the splat centre. Mesh chunks keep the object's own coordinates,
+// which is the space splatCenter lives in, so the fields line up.
+const MESH_FX_VERTEX_BODY = `
+  bool vvjDeckA = uVvjIsDeckA > 0.5;
+
+  float vvjFlanger = vvjDeckA ? uFxFlangerAmountA : uFxFlangerAmountB;
+  float vvjBeatFreq = vvjDeckA ? uFxBeatFreqA : uFxBeatFreqB;
+  if (uFxFlangerAmountM > 0.0) { vvjFlanger += uFxFlangerAmountM; vvjBeatFreq = uFxBeatFreqM; }
+  if (vvjFlanger > 0.0) {
+    vec3 p = transformed * 5.0;
+    vec3 cell = floor(p);
+    vec3 frac = fract(p);
+    vec3 jitter = sin(cell * 11.45 + uFxTime * vvjBeatFreq * 2.0) * 0.45;
+    float voronoiNoise = smoothstep(0.0, 0.8, length(frac - (0.5 + jitter)));
+    transformed *= (1.0 + voronoiNoise * vvjFlanger * 0.6);
+  }
+
+  float vvjPhaser = vvjDeckA ? uFxPhaserAmountA : uFxPhaserAmountB;
+  vvjPhaser += uFxPhaserAmountM;
+  if (vvjPhaser > 0.0) {
+    float wave = transformed.y * 15.0 + transformed.x * 10.0 + transformed.z * 5.0;
+    float notchSum = (sin(wave) + sin(wave + uFxTime * vvjBeatFreq * 3.0)) * 0.5;
+    transformed *= mix(1.0, 0.5 + 0.5 * notchSum, vvjPhaser);
+  }
+
+  float vvjSquashX = (vvjDeckA ? uFxPitchSquashXA : uFxPitchSquashXB) * uFxPitchSquashXM;
+  float vvjStretchY = (vvjDeckA ? uFxPitchStretchYA : uFxPitchStretchYB) * uFxPitchStretchYM;
+  float vvjSquashY = (vvjDeckA ? uFxPitchSquashYA : uFxPitchSquashYB) * uFxPitchSquashYM;
+  float vvjStretchX = (vvjDeckA ? uFxPitchStretchXA : uFxPitchStretchXB) * uFxPitchStretchXM;
+  transformed.x *= vvjSquashX * vvjStretchX;
+  transformed.y *= vvjStretchY * vvjSquashY;
+
+  // The channel filter shrinks splats; on a mesh it shrinks the geometry.
+  transformed *= max(vvjDeckA ? uFaderScaleA : uFaderScaleB, 0.0001);
+
+  // Filter FX: the splat path bakes this into the cloud at rebuild time
+  // (applyFilterFx). It is a pure function of position, so the mesh runs the
+  // same maths live, per vertex — concentric shells pushed outward, with the
+  // band level driving how much survives.
+  vVvjBandLevel = 1.0;
+  if (uVvjFilterAmount > 0.0) {
+    vec3 rel = (transformed - uVvjBoundsCenter) / uVvjBoundsSize;
+    float radius = min(1.0, length(rel));
+    float shellCount = 18.0;
+    float shell = radius * shellCount;
+    float shellIndex = min(shellCount - 1.0, floor(shell));
+    float shellLocal = shell - shellIndex;
+    float region = min(2.0, floor(radius * 3.0));
+    float bandLevel = region < 0.5 ? uVvjFilterBands.x
+                    : (region < 1.5 ? uVvjFilterBands.y : uVvjFilterBands.z);
+    vec3 d = transformed - uVvjBoundsCenter;
+    vec3 n = d / max(0.0001, length(d));
+    float grain = sin((shellIndex + 1.0) * 16.193 + uVvjFilterAmount * 5.7);
+    float shellPulse = 0.55 + abs(shellLocal - 0.5) * 0.9;
+    float cutAmount = uVvjFilterAmount * bandLevel * shellPulse;
+    float shellGap = max(max(uVvjBoundsSize.x, uVvjBoundsSize.y), uVvjBoundsSize.z) * 0.16 * cutAmount;
+    float tangentJitter = cos(shellIndex * 2.31) * 0.035 * cutAmount;
+    transformed += n * shellGap * (0.85 + grain * 0.22);
+    transformed.x += n.z * uVvjBoundsSize.x * tangentJitter;
+    transformed.z -= n.x * uVvjBoundsSize.z * tangentJitter;
+    vVvjBandLevel = bandLevel;
+  }
+`;
+
+const MESH_FX_FRAGMENT_DECL = `
+  uniform float uVvjLoopTint;
+  uniform float uVvjGhostFade;
+  uniform vec3 uVvjGhostTint;
+  varying float vVvjBandLevel;
+`;
+
+// The chunk-range loop's orange highlight (the splat path's vLoopTint), the
+// filter's per-band fade, and the spiral/reverb ghost decay + colour push.
+const MESH_FX_FRAGMENT_BODY = `
+  gl_FragColor.a *= vVvjBandLevel;
+  if (uVvjGhostFade < 1.0) {
+    gl_FragColor.a *= uVvjGhostFade;
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uVvjGhostTint, 1.0 - uVvjGhostFade);
+  }
+  if (uVvjLoopTint > 0.5) {
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0, 0.5, 0.0), 0.7);
+  }
+`;
+
+/** The FX uniforms a mesh material shares with the splat material. */
+const MESH_FX_SHARED_UNIFORMS = [
+  'uFxTime',
+  'uFxFlangerAmountA', 'uFxPhaserAmountA', 'uFxBeatFreqA',
+  'uFxPitchSquashXA', 'uFxPitchStretchYA', 'uFxPitchSquashYA', 'uFxPitchStretchXA',
+  'uFxFlangerAmountB', 'uFxPhaserAmountB', 'uFxBeatFreqB',
+  'uFxPitchSquashXB', 'uFxPitchStretchYB', 'uFxPitchSquashYB', 'uFxPitchStretchXB',
+  'uFxFlangerAmountM', 'uFxPhaserAmountM', 'uFxBeatFreqM',
+  'uFxPitchSquashXM', 'uFxPitchStretchYM', 'uFxPitchSquashYM', 'uFxPitchStretchXM',
+  'uFaderScaleA', 'uFaderScaleB',
+];
+
+/** Neutral stand-ins, used until the splat material exists to borrow from. */
+function fallbackFxUniform(name) {
+  const ones = name.startsWith('uFxPitch') || name.startsWith('uFaderScale') || name.startsWith('uFxBeatFreq');
+  return { value: ones ? 1.0 : 0.0 };
+}
+
+// Per-material FX state. It lives in a WeakMap rather than material.userData
+// because Material.clone() JSON-copies userData: the per-chunk uniform objects
+// would survive as disconnected plain data, and the FX knobs would move the
+// splats while the mesh sat still.
+const meshFxState = new WeakMap();
+
+function prepareDeckMeshMaterials(object, deckKey = 'a') {
+  const splatUniforms = viewer?.splatMesh?.material?.uniforms || null;
+
+  object.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!mat) continue;
+
+      let state = meshFxState.get(mat);
+      if (!state) {
+        state = {
+          own: {
+            uVvjIsDeckA: { value: deckKey === 'a' ? 1 : 0 },
+            uVvjLoopTint: { value: 0 },
+            uVvjFilterAmount: { value: 0 },
+            uVvjFilterBands: { value: new THREE.Vector3(1, 1, 1) },
+            uVvjBoundsCenter: { value: new THREE.Vector3() },
+            uVvjBoundsSize: { value: new THREE.Vector3(1, 1, 1) },
+            uVvjGhostFade: { value: 1 },
+            uVvjGhostTint: { value: new THREE.Vector3(1, 0.45, 0.2) },
+          },
+          shared: {},
+          sharedSource: null,
+          patched: false,
+          // Remember whether the source material was already alpha-blended, so
+          // the crossfader's opacity handling doesn't turn it opaque later.
+          wasTransparent: mat.transparent === true,
+        };
+        meshFxState.set(mat, state);
+      }
+      state.own.uVvjIsDeckA.value = deckKey === 'a' ? 1 : 0;
+
+      // Re-point the shared uniforms every time: the splat material is rebuilt
+      // with the viewer (any CPU FX or mixer change does it), and the objects a
+      // compiled shader captured go stale.
+      const shared = {};
+      for (const name of MESH_FX_SHARED_UNIFORMS) {
+        shared[name] = splatUniforms?.[name] || state.shared[name] || fallbackFxUniform(name);
+      }
+      const rebound = state.sharedSource !== splatUniforms;
+      state.shared = shared;
+      state.sharedSource = splatUniforms;
+
+      if (!state.patched) {
+        state.patched = true;
+        mat.side = THREE.DoubleSide; // single-sided game assets shouldn't vanish
+
+        const prior = mat.onBeforeCompile;
+        mat.onBeforeCompile = (shader, renderer) => {
+          prior?.call(mat, shader, renderer);
+          for (const name of MESH_FX_SHARED_UNIFORMS) shader.uniforms[name] = state.shared[name];
+          Object.assign(shader.uniforms, state.own);
+
+          shader.vertexShader = MESH_FX_VERTEX_DECL + shader.vertexShader.replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>' + MESH_FX_VERTEX_BODY,
+          );
+          shader.fragmentShader = MESH_FX_FRAGMENT_DECL + shader.fragmentShader.replace(
+            '#include <colorspace_fragment>',
+            '#include <colorspace_fragment>' + MESH_FX_FRAGMENT_BODY + SRGB_ENCODE_SNIPPET,
+          );
+        };
+        mat.needsUpdate = true;
+      } else if (rebound) {
+        // A recompile is what re-runs onBeforeCompile and picks up the new objects.
+        mat.needsUpdate = true;
+      }
+    }
+  });
+}
+
+/** Re-point every mesh deck's materials at the current splat FX uniforms. */
+function refreshDeckMeshFxUniforms() {
+  for (const k of ['a', 'b', 'c', 'd']) {
+    const entry = deckMeshes[k];
+    if (entry) prepareDeckMeshMaterials(entry.group, k);
+  }
+}
+
+// ── Ghost trails (spiral / reverb) ──────────────────────────────────────────
+// Those two FX work by adding faded, displaced copies of the splats. Their
+// displacement is rigid about the scene centre, so the mesh gets the same look
+// from extra draws of the chunk geometry under a per-tap transform — no
+// geometry is duplicated, only meshes sharing it.
+const MESH_MAX_GHOSTS = 7;
+
+// Keyed by chunk group. Not stored on userData: Object3D.clone() runs userData
+// through JSON, which cannot survive scene-graph objects (circular refs) — the
+// roll FX clones chunks, and that would throw every rebuild.
+const chunkGhosts = new WeakMap();
+const ghostMeshes = new WeakSet();
+
+/** Build (once) the ghost meshes for a chunk: same geometry, own materials. */
+function ensureChunkGhosts(chunk, deckKey) {
+  const existing = chunkGhosts.get(chunk);
+  if (existing) return existing;
+
+  const sources = [];
+  chunk.traverse((o) => { if (o.isMesh && !ghostMeshes.has(o)) sources.push(o); });
+
+  const ghosts = [];
+  for (let tap = 0; tap < MESH_MAX_GHOSTS; tap++) {
+    const group = new THREE.Group();
+    group.visible = false;
+    group.matrixAutoUpdate = true;
+    for (const src of sources) {
+      const mat = Array.isArray(src.material)
+        ? src.material.map((m) => m.clone())
+        : src.material.clone();
+      for (const m of (Array.isArray(mat) ? mat : [mat])) {
+        m.transparent = true;
+        m.depthWrite = false; // trails read as translucent, like the splat ghosts
+      }
+      const ghost = new THREE.Mesh(src.geometry, mat);
+      ghostMeshes.add(ghost);
+      ghost.frustumCulled = false;
+      group.add(ghost);
+    }
+    chunk.add(group);
+    ghosts.push(group);
+  }
+  chunkGhosts.set(chunk, ghosts);
+  // The clones are fresh material instances; give them the FX patch too.
+  prepareDeckMeshMaterials(chunk, deckKey);
+  return ghosts;
+}
+
+/**
+ * Place a chunk's ghost trail for the FX currently engaged on its deck.
+ * Mirrors applySpiralFx / applyReverbFx: spiral rotates each tap further around
+ * Y while collapsing toward the centre and drifting up; reverb scatters taps
+ * with a decaying offset and grows them slightly.
+ */
+function updateChunkGhosts(chunk, chunkIndex, fx, bounds, deckKey) {
+  const active = fx.kind === 'spiral' || fx.kind === 'reverb';
+  if (!active && !chunkGhosts.has(chunk)) return;
+
+  const ghosts = ensureChunkGhosts(chunk, deckKey);
+  const amount = fx.amount;
+  const taps = active
+    ? Math.min(MESH_MAX_GHOSTS, fx.kind === 'spiral'
+      ? 2 + Math.round(amount * 5)
+      : 2 + Math.round(amount * 4))
+    : 0;
+
+  for (let i = 0; i < ghosts.length; i++) {
+    const group = ghosts[i];
+    const tap = i + 1;
+    if (tap > taps) { group.visible = false; continue; }
+    group.visible = true;
+
+    if (fx.kind === 'spiral') {
+      const angle = tap * (0.35 + amount * 0.82);
+      // The splat version collapses each tap toward the centre and lifts it a
+      // little. Inside an opaque shell those copies would never be seen, so the
+      // mesh keeps the rotation and fade but stacks the taps up the Y axis and
+      // collapses more gently — the same rising spiral, actually visible.
+      const collapse = Math.pow(0.94 - amount * 0.12, tap);
+      group.quaternion.setFromAxisAngle(_yAxis, angle);
+      group.scale.setScalar(collapse);
+      group.position.set(0, bounds.size[1] * (0.10 + amount * 0.14) * tap, 0);
+      setGhostFade(group, Math.pow(0.74, tap), 1.0, 0.35, 0.15);
+    } else {
+      // reverb: a per-chunk pseudo-random direction stands in for the splat
+      // path's per-splat phase, so each chunk scatters its own way.
+      const spread = 0.025 + amount * 0.08;
+      const phase = chunkIndex * 19.19 + tap * 7.77;
+      group.quaternion.identity();
+      group.scale.setScalar(1 + tap * 0.35 * 0.15);
+      group.position.set(
+        Math.sin(phase) * bounds.size[0] * spread * tap,
+        Math.cos(phase * 0.71) * bounds.size[1] * spread * tap,
+        Math.sin(phase * 1.37) * bounds.size[2] * spread * tap,
+      );
+      setGhostFade(group, Math.pow(0.25 + amount * 0.42, tap), 0.8, 0.8, 0.9);
+    }
+    group.updateMatrix();
+  }
+}
+
+function setGhostFade(group, fade, tintR, tintG, tintB) {
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      const own = mat && meshFxState.get(mat)?.own;
+      if (!own) continue;
+      own.uVvjGhostFade.value = fade;
+      own.uVvjGhostTint.value.set(tintR, tintG, tintB);
+    }
+  });
+}
+
+/** Which CPU FX (if any) is driving a deck right now, and how hard. */
+function deckCpuFxState(key) {
+  const perDeck = {
+    a: [fxEngagedA, fxActiveA, fxDepthA],
+    b: [fxEngagedB, fxActiveB, fxDepthB],
+    c: [fxEngagedC, fxActiveC, fxDepthC],
+    d: [fxEngagedD, fxActiveD, fxDepthD],
+  }[key];
+
+  if (fxEngagedM && fxActiveM !== 'none') {
+    return { kind: fxActiveM, amount: Number(fxDepthM.value) / 100 };
+  }
+  if (perDeck && perDeck[0] && perDeck[1] !== 'none') {
+    return { kind: perDeck[1], amount: Number(perDeck[2].value) / 100 };
+  }
+  return { kind: 'none', amount: 0 };
+}
+
+/** Per-chunk FX state that cannot be shared: which deck, and loop highlight. */
+function setDeckMeshChunkFxState(chunkGroup, isDeckA, loopTint, filter) {
+  chunkGroup.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      const own = mat && meshFxState.get(mat)?.own;
+      if (!own) continue;
+      own.uVvjIsDeckA.value = isDeckA ? 1 : 0;
+      own.uVvjLoopTint.value = loopTint ? 1 : 0;
+      if (filter) {
+        own.uVvjFilterAmount.value = filter.amount;
+        own.uVvjFilterBands.value.set(filter.low, filter.mid, filter.high);
+        own.uVvjBoundsCenter.value.set(filter.center[0], filter.center[1], filter.center[2]);
+        own.uVvjBoundsSize.value.set(filter.size[0], filter.size[1], filter.size[2]);
+      }
+    }
+  });
+}
+
+// Metal/rough PBR assets are lit almost entirely by their environment: with
+// HDRI set to NONE a metallic model renders black no matter how many lights it
+// has. Fall back to a neutral room environment so any model is legible.
+let defaultMeshEnv = null;
+function disposeDefaultMeshEnv() {
+  defaultMeshEnv?.dispose?.();
+  defaultMeshEnv = null;
+}
+function getDefaultMeshEnv() {
+  if (defaultMeshEnv || !viewer?.renderer) return defaultMeshEnv;
+  const pmrem = new THREE.PMREMGenerator(viewer.renderer);
+  defaultMeshEnv = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmrem.dispose();
+  return defaultMeshEnv;
+}
+
+/** Feed the current environment to a mesh's materials (per-scene environment
+ *  does not apply: these groups are rendered on their own). */
+function applyHdriEnvToObject(object) {
+  if (!object) return;
+  const env = currentHdriEnv || getDefaultMeshEnv();
+  object.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!mat || !('envMap' in mat)) continue;
+      mat.envMap = env;
+      // The neutral room fallback is bright and omnidirectional; dial it back so
+      // it lights the model without washing out its own shading.
+      mat.envMapIntensity = currentHdriEnv ? 1.0 : 0.55;
+      mat.needsUpdate = true;
+    }
+  });
+}
+
+function refreshDeckMeshEnvironments() {
+  for (const k of ['a', 'b', 'c', 'd']) {
+    if (deckMeshes[k]) applyHdriEnvToObject(deckMeshes[k].object);
+  }
+}
+
+/**
+ * Fade a deck's mesh with the crossfader, matching the splat path's opacity.
+ * This has to walk the deck's render root — the chunks are clones of the source
+ * object, so fading `entry.object` would change nothing that is drawn.
+ */
+/**
+ * Set the alpha a deck's mesh draws at. This carries the strobe/trans flash
+ * only — the crossfade is applied as scale in syncDeckMeshTransforms instead
+ * (see deckCrossfadeLevel), because alpha-blending a solid model makes it look
+ * like a ghost of itself and a dithered dissolve leaves a screen-door pattern.
+ */
+function setDeckMeshOpacity(entry, opacity) {
+  const alpha = Math.min(1, opacity);
+  if (entry.opacity === alpha) return;
+  entry.opacity = alpha;
+
+  entry.group.traverse((o) => {
+    if (!o.isMesh) return;
+    const isGhost = ghostMeshes.has(o);
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!mat) continue;
+      mat.opacity = alpha;
+      // Trails are translucent by nature; the model only blends while the
+      // strobe is actually pulling it down.
+      mat.transparent = isGhost || alpha < 0.995 || meshFxState.get(mat)?.wasTransparent === true;
+      if (!isGhost) mat.depthWrite = true;
+    }
+  });
+}
+
+/**
+ * How much of this deck the crossfader is letting through, matching the splat
+ * path's deck opacity. A lone deck ignores the crossfader, exactly as the
+ * single-deck render path does.
+ */
+function deckCrossfadeLevel(key) {
+  if (loadedDeckKeys().length <= 1) return 1;
+  if (key === 'a') return 1 - crossfadeMix;
+  if (key === 'b') return crossfadeMix;
+  return 1; // C/D are not on the crossfader
+}
+
+function disposeDeckMesh(key) {
+  const entry = deckMeshes[key];
+  if (!entry) return;
+  entry.object.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry?.dispose?.();
+    for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!mat) continue;
+      mat.map?.dispose?.();
+      mat.dispose?.();
+    }
+  });
+  deckMeshes[key] = null;
+}
+
+/**
+ * Cut this deck's mesh into the same chunks the splat slicer just produced, so
+ * every per-chunk deck behaviour (cut-up slicing, play pulse, EQ band scaling,
+ * chunk-range loop, roll, pitch chaos) drives the mesh exactly as it drives the
+ * splats: each mesh chunk simply copies its splat scene's transform each frame.
+ *
+ * @param {string} key            deck letter
+ * @param {Array} splatChunks     the sliceIntoSpheres result (carries .meta)
+ * @param {number} rollChunkCount extra frozen copies of chunk 0 the roll FX added
+ */
+function rebuildDeckMeshChunks(key, splatChunks, rollChunkCount = 0) {
+  const entry = deckMeshes[key];
+  if (!entry || !splatChunks?.meta) return;
+
+  clearDeckMeshChunks(entry);
+
+  const groups = sliceObjectIntoChunkGroups(entry.object, splatChunks.meta, chunkIdForPoint);
+  // Roll adds N more scenes that are duplicates of chunk 0; mirror them so the
+  // scene indices keep lining up and the trailing copies show up on the mesh too.
+  for (let j = 0; j < rollChunkCount; j++) {
+    const clone = groups[0] ? groups[0].clone(true) : new THREE.Group();
+    groups.push(clone);
+  }
+
+  entry.chunks = groups;
+  entry.opacity = -1; // fresh materials: force the next fade to re-apply
+  for (const g of groups) {
+    g.matrixAutoUpdate = false;
+    // Each chunk needs its own material instance: the loop highlight is per
+    // chunk, and it lives in the material's uniforms.
+    g.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
+    });
+    entry.group.add(g);
+  }
+  prepareDeckMeshMaterials(entry.group, key);
+  applyHdriEnvToObject(entry.group);
+}
+
+/** Drop the chunk groups from a deck's render group (keeps its lights). */
+function clearDeckMeshChunks(entry) {
+  for (const g of entry.chunks || []) {
+    entry.group.remove(g);
+    g.traverse((o) => { if (o.isMesh) o.geometry?.dispose?.(); });
+  }
+  entry.chunks = [];
+}
+
+/** Copy every splat chunk's transform onto the matching mesh chunk. */
+function syncDeckMeshTransforms() {
+  if (!viewer) return;
+  const loaded = { a: !!sceneA, b: !!sceneB, c: !!sceneC, d: !!sceneD };
+  const ranges = deckSceneRanges();
+
+  for (const k of ['a', 'b', 'c', 'd']) {
+    const entry = deckMeshes[k];
+    if (!entry) continue;
+    entry.group.visible = solidMeshMode && loaded[k];
+    if (!entry.group.visible || !entry.chunks?.length) continue;
+
+    const [start, count] = ranges[k];
+    const isDeckA = k === 'a';
+    // Chunk-range loop highlight: read the same uniforms the splat shader uses,
+    // so a looped range tints identically on the mesh.
+    const u = viewer.splatMesh?.material?.uniforms;
+    const loopActive = isDeckA ? (u?.uLoopActiveA?.value > 0.5) : (u?.uLoopActiveB?.value > 0.5);
+    const loopStart = isDeckA ? (u?.uLoopStartA?.value ?? 0) : (u?.uLoopStartB?.value ?? 0);
+    const loopEnd = isDeckA ? (u?.uLoopEndA?.value ?? 0) : (u?.uLoopEndB?.value ?? 0);
+
+    // The scene list is rebuilt asynchronously; a frame can land while it is
+    // shorter than the chunk list, and getSplatScene() throws past the end.
+    const sceneCount = viewer.splatMesh?.getSceneCount?.() ?? 0;
+    // Filter FX is baked into the splat cloud at rebuild time; the mesh runs it
+    // live in its vertex shader, from the same amount and the band defaults
+    // applyFilterFx uses (processFx passes it only an amount).
+    // Crossfading a solid mesh by alpha or by dither looks wrong (a ghost of
+    // itself, or a screen-door pattern over it), so a fading deck shrinks away
+    // instead — the same language the volume fader already uses. The curve is
+    // gentle so the model keeps its size through most of the fader's travel.
+    const fadeScale = Math.pow(Math.max(0, deckCrossfadeLevel(k)), 0.4);
+
+    const fx = deckCpuFxState(k);
+    const filter = {
+      amount: fx.kind === 'filter' ? fx.amount : 0,
+      low: 0.65, mid: 0.5, high: 0.35,
+      center: entry.bounds.center,
+      size: entry.bounds.size,
+    };
+
+    for (let i = 0; i < entry.chunks.length; i++) {
+      const chunk = entry.chunks[i];
+      const sceneIndex = start + i;
+      const splatScene = (i < count && sceneIndex < sceneCount) ? viewer.getSplatScene(sceneIndex) : null;
+      if (!splatScene) { chunk.visible = false; continue; }
+      chunk.visible = splatScene.visible;
+      chunk.scale.copy(splatScene.scale).multiplyScalar(fadeScale);
+      chunk.quaternion.copy(splatScene.quaternion);
+      chunk.position.copy(splatScene.position);
+      chunk.updateMatrix();
+      chunk.updateMatrixWorld(true);
+
+      setDeckMeshChunkFxState(chunk, isDeckA,
+        loopActive && sceneIndex >= loopStart && sceneIndex <= loopEnd, filter);
+      updateChunkGhosts(chunk, i, fx, entry.bounds, k);
+    }
+  }
+}
+
+/** Centre and per-axis size of a loaded mesh, in the space its chunks live in. */
+function meshObjectBounds(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  box.getCenter(center);
+  box.getSize(size);
+  return {
+    center: [center.x, center.y, center.z],
+    size: [Math.max(size.x, 0.001), Math.max(size.y, 0.001), Math.max(size.z, 0.001)],
+  };
+}
+
+/** Framing correction for decks holding a polygon mesh (see MESH_FRAME_FIT). */
+function deckFrameFit(key) {
+  return deckMeshes[key] ? MESH_FRAME_FIT : 1.0;
+}
+
+/** True when this deck should draw a solid mesh instead of its splats. */
+function deckRendersSolidMesh(key) {
+  return solidMeshMode && !!deckMeshes[key];
+}
+
+function drawDeckMesh(renderer, key, camera, opacity) {
+  const entry = deckMeshes[key];
+  if (!entry || !entry.group.visible) return;
+  setDeckMeshOpacity(entry, opacity);
+
+  const ghosts = visibleGhostGroups(entry);
+
+  if (!ghosts.length) {
+    renderer.render(entry.group, camera);
+    return;
+  }
+
+  // Trails first, model second. three always draws transparent objects after
+  // opaque ones, so in a single pass the ghosts would blend on top of the model
+  // and veil it — the mesh looked semi-transparent whenever spiral or reverb
+  // was engaged. Two passes put the trails behind, where they belong.
+  setChunkSolidsVisible(entry, false);
+  renderer.render(entry.group, camera);
+  setChunkSolidsVisible(entry, true);
+
+  setVisible(ghosts, false);
+  renderer.render(entry.group, camera);
+  setVisible(ghosts, true);
+}
+
+function setVisible(objects, visible) {
+  for (const o of objects) o.visible = visible;
+}
+
+/** The ghost trail groups a deck is currently showing. */
+function visibleGhostGroups(entry) {
+  const out = [];
+  for (const chunk of entry.chunks || []) {
+    for (const ghost of chunkGhosts.get(chunk) || []) {
+      if (ghost.visible) out.push(ghost);
+    }
+  }
+  return out;
+}
+
+/** Toggle a deck's solid chunk geometry (its ghost groups are left alone). */
+function setChunkSolidsVisible(entry, visible) {
+  for (const chunk of entry.chunks || []) {
+    for (const child of chunk.children) {
+      if (child.isMesh) child.visible = visible;
+    }
+  }
+}
+
+/** Re-sample every mesh deck after the SOLID MESH toggle: solid decks only need
+ *  a cheap proxy cloud for bounds/chunking, splat decks need full density. */
+async function resampleMeshDecks() {
+  const count = solidMeshMode ? MESH_PROXY_SAMPLES : MESH_SPLAT_SAMPLES;
+  let changed = false;
+
+  for (const L of ['a', 'b', 'c', 'd']) {
+    const entry = deckMeshes[L];
+    if (!entry) continue;
+
+    const rawScene = new SplatData(sampleObjectToSplatBytes(entry.object, { count }));
+    const defaultCount = Math.min(250000, rawScene.splatCount);
+    const slider = document.getElementById(`max-splats-slider-${L}`);
+    const valEl = document.getElementById(`max-splats-val-${L}`);
+    if (slider) {
+      slider.min = Math.min(250000, rawScene.splatCount);
+      slider.max = rawScene.splatCount;
+      slider.value = defaultCount;
+      if (valEl) {
+        valEl.textContent = defaultCount >= 1000000
+          ? (defaultCount / 1000000).toFixed(1) + 'M'
+          : Math.floor(defaultCount / 1000) + 'k';
+      }
+    }
+    const scene = limitSplatCount(rawScene, defaultCount);
+    if (L === 'a') { rawSceneA = rawScene; sceneA = scene; }
+    if (L === 'b') { rawSceneB = rawScene; sceneB = scene; }
+    if (L === 'c') { rawSceneC = rawScene; sceneC = scene; }
+    if (L === 'd') { rawSceneD = rawScene; sceneD = scene; }
+    changed = true;
+  }
+
+  if (changed) await rebuildViewerBuffers();
+  return changed;
+}
+
 // Per-frame: each deck independently eases its own current angles toward its
 // target (preset + jog orbit) and positions its own camera around the origin.
 // MULTI-VIEW: no more crossfader blend — `mixAmount` is ignored for the camera.
@@ -487,7 +1228,7 @@ appDiv.innerHTML = `
   <!-- LEFT PANEL: DECK A + CH 1 MIXER -->
   <div class="hud-panel panel-left" id="deck-a">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="icon-btn" id="btn-load-a">⏏<input type="file" id="file-a" accept=".ply,.splat,.ksplat,.sog,.ssog,.png,.jpg,.jpeg"></label>
+      <label class="icon-btn" id="btn-load-a">⏏<input type="file" id="file-a" multiple accept=".ply,.splat,.ksplat,.sog,.ssog,.spz,.png,.jpg,.jpeg,.webp,.obj,.fbx,.usdz,.gltf,.glb,.json,.mtl,.bin"></label>
       <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-a-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
         <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
@@ -566,7 +1307,7 @@ appDiv.innerHTML = `
   <!-- RIGHT PANEL: DECK B + CH 2 MIXER -->
   <div class="hud-panel panel-right" id="deck-b">
     <div class="section-box deck-header" style="display:flex; flex-direction:row; align-items:center; gap:12px;">
-      <label class="icon-btn" id="btn-load-b">⏏<input type="file" id="file-b" accept=".ply,.splat,.ksplat,.sog,.ssog,.png,.jpg,.jpeg"></label>
+      <label class="icon-btn" id="btn-load-b">⏏<input type="file" id="file-b" multiple accept=".ply,.splat,.ksplat,.sog,.ssog,.spz,.png,.jpg,.jpeg,.webp,.obj,.fbx,.usdz,.gltf,.glb,.json,.mtl,.bin"></label>
       <div class="flex-col" style="gap:4px; align-items:flex-start; flex:1;">
         <div id="file-b-name" class="deck-file-name" style="color:#f97316; margin:0;">No file</div>
         <div class="flex-row" style="gap:4px; align-items:center; justify-content:space-between; width:100%;">
@@ -656,6 +1397,9 @@ appDiv.innerHTML = `
       <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
         <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG
       </label>
+      <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;" title="Render loaded 3D models as solid lit geometry. Uncheck to convert them to gaussian splats instead (cut-up FX apply to splats only).">
+        <input type="checkbox" id="chk-solid-mesh" checked> SOLID MESH
+      </label>
       <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
         <input type="checkbox" id="chk-use-colab"> COLAB
       </label>
@@ -670,6 +1414,8 @@ appDiv.innerHTML = `
           <option value="ddj-flx4" selected>DDJ-FLX4</option>
           <option value="ddj-200">DDJ-200</option>
           <option value="idj">iCON iDJ</option>
+          <option value="nanokontrol2">KORG nanoKONTROL2</option>
+          <option value="djc-diy">DJC-DIY</option>
         </select>
         <button id="btn-midi-guide" class="util-btn" style="font-size:9px; padding:2px 5px; background:#7c3aed;">MIDI MAP</button>
         <input id="midi-import-file" type="file" accept="application/json,.json" style="display:none;" />
@@ -1084,6 +1830,19 @@ if (chkRemoveBg) {
     // Just placeholder since we only check this on loadFile
   });
 }
+
+// SOLID MESH: draw loaded 3D models as real lit geometry (on) or convert them
+// to gaussian splats like everything else (off, which is what the cut-up FX act on).
+document.getElementById('chk-solid-mesh')?.addEventListener('change', async (e) => {
+  solidMeshMode = e.target.checked;
+  const hadMesh = await resampleMeshDecks();
+  if (hadMesh) {
+    statusEl.textContent = solidMeshMode
+      ? 'Meshes rendering as solid geometry.'
+      : 'Meshes converted to splats (cut-up FX apply).';
+  }
+  triggerRealtimeUpdate();
+});
 
 document.getElementById('chk-dof')?.addEventListener('change', (e) => {
   if (bokehPass) bokehPass.enabled = e.target.checked;
@@ -1740,6 +2499,9 @@ async function loadHdriFromUrl(url) {
     if (viewer.threeScene) {
       viewer.threeScene.environment = envMap;
     }
+    // Solid meshes render outside viewer.threeScene, so they need the env map
+    // handed to their materials directly.
+    refreshDeckMeshEnvironments();
   } catch(e) {
     console.warn('HDRI load failed:', e);
     alert('Failed to load HDRI: ' + e.message);
@@ -1780,6 +2542,7 @@ async function setHdri(preset) {
       currentHdriEnv.dispose();
       currentHdriEnv = null;
     }
+    refreshDeckMeshEnvironments();
     return;
   }
 
@@ -1794,6 +2557,7 @@ async function setHdri(preset) {
     }
     if (currentHdriTexture) { currentHdriTexture.dispose(); currentHdriTexture = null; }
     if (currentHdriEnv)     { currentHdriEnv.dispose();     currentHdriEnv = null; }
+    refreshDeckMeshEnvironments();
 
     // 2. Resolve API key: localStorage → VITE env var → prompt
     let apiKey = localStorage.getItem('vvj-gmaps-key') || (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_GOOGLE_MAPS_KEY) || '';
@@ -1878,6 +2642,8 @@ const BUILTIN_MIDI_PROFILES = [
   { value: 'ddj-flx4', label: 'DDJ-FLX4' },
   { value: 'ddj-200',  label: 'DDJ-200' },
   { value: 'idj',      label: 'iCON iDJ' },
+  { value: 'nanokontrol2', label: 'KORG nanoKONTROL2' },
+  { value: 'djc-diy',  label: 'DJC-DIY' },
 ];
 
 /**
@@ -2182,6 +2948,7 @@ window._buildTableFromImport = buildTableFromImport;
     { title: 'PADS B', rows: padRows('b') },
     { title: 'GLOBAL', rows: [
       ['jog-a', 'Jog A'], ['jog-b', 'Jog B'],
+      ['jog-a-encoder', 'Jog A (DIY encoder)'], ['jog-b-encoder', 'Jog B (DIY encoder)'],
       ['knob-dof', 'DOF'], ['knob-lensflare', 'Lens Flare'], ['hdri', 'HDRI scrub'],
       ['strobe', 'Strobe toggle'], ['strobe-3state', 'Strobe 3-state (knob)'],
     ]},
@@ -2911,7 +3678,9 @@ btnBeatNextM.addEventListener('click', () => {
   }
 });
 btnFxToggleM.addEventListener('click', async () => {
-  if (!sceneA) { statusEl.textContent = 'Load a splat scene first!'; return; }
+  // Master FX runs on the master bus, so any loaded deck qualifies — requiring
+  // deck A left it dead in a deck-B-only session.
+  if (loadedDeckKeys().length === 0) { statusEl.textContent = 'Load a splat scene first!'; return; }
   fxEngagedM = !fxEngagedM;
   if (fxEngagedM) {
     btnFxToggleM.classList.add('active');
@@ -3323,7 +4092,9 @@ btnStopB.addEventListener('click', () => stopDeck('b', true));
 // hot-cue pads keep firing loops as before.
 const PAD_LOOP_LENGTHS = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]; // beats
 function setDeckLoopDown(isDeckA, index) {
-  if (!sceneA) return;
+  // Guard the deck being looped, not always deck A — otherwise deck B's pads are
+  // dead whenever deck B is the only loaded deck.
+  if (isDeckA ? !sceneA : !sceneB) return;
   const len = PAD_LOOP_LENGTHS[index] ?? 1;
   if (isDeckA) {
     loopActiveA = true;
@@ -3361,6 +4132,13 @@ window._setDeckLoop = (deckStr, index, down) => {
   setPadLed(deckStr, index, down);
   syncDeckLeds(deckStr);
 };
+
+// Test hook: read back the loop state the pads drive. Nothing else observes it
+// from outside — the LED mirror needs a real MIDI output port to be visible.
+window.__loopDebug = () => ({
+  a: { active: loopActiveA, start: loopStartA, length: loopLengthA },
+  b: { active: loopActiveB, start: loopStartB, length: loopLengthB },
+});
 
 // On-screen pads now set the deck's camera VIEWPOINT preset (the rig eases to it).
 // `deckKey` is 'a'/'b'/'c'/'d'; each deck's pads drive only its own camera.
@@ -4227,7 +5005,18 @@ function setupPostProcessingAndLensFlare() {
         }
         if (viewer.threeScene) renderer.render(viewer.threeScene, viewer.camera);
         renderStrobe();
-        if (mesh) renderer.render(mesh, viewer.camera);
+        // Solid-mesh decks draw their triangles instead of their splat proxy.
+        // A lone deck ignores the crossfader (as the splat branch does above)
+        // but still takes the strobe/trans alpha.
+        const soloKey = keys[0];
+        if (soloKey) {
+          renderer.clearDepth();
+          drawDeckMesh(renderer, soloKey, viewer.camera,
+            soloKey === 'a' ? strobeAlphaBaseA : strobeAlphaBaseB);
+        }
+        if (mesh && !(soloKey && deckRendersSolidMesh(soloKey))) {
+          renderer.render(mesh, viewer.camera);
+        }
         if (viewer.sceneHelper) {
           if (viewer.sceneHelper.getFocusMarkerOpacity() > 0.0)
             renderer.render(viewer.sceneHelper.focusMarker, viewer.camera);
@@ -4296,6 +5085,14 @@ function setupPostProcessingAndLensFlare() {
       };
       const drawKeys = keys.filter((k) => deckOpacity(k) > OPACITY_EPS);
 
+      // A deck faded out is skipped below and never re-drawn, so zero its mesh
+      // opacity here rather than leaving it at the last value it was drawn with.
+      for (const k of keys) {
+        if (deckRendersSolidMesh(k) && !drawKeys.includes(k)) {
+          deckMeshes[k].group.visible = false;
+        }
+      }
+
       // Keep the primary/sort camera tracking a deck that is actually rendered. The
       // worker sorts splats against viewer.camera; updateCameraRig synced it to the
       // first LOADED deck, but if that deck got skipped here, fall back to the first
@@ -4334,6 +5131,20 @@ function setupPostProcessingAndLensFlare() {
         if (cam.isPerspectiveCamera && Math.abs(cam.aspect - fullAspect) > 1e-4) {
           cam.aspect = fullAspect;
           cam.updateProjectionMatrix();
+        }
+
+        // Every deck composites as its own full-screen layer, so each starts
+        // from a clean depth buffer. Without this two solid meshes share one,
+        // and their geometry interpenetrates and flickers as the decks move.
+        renderer.clearDepth();
+
+        // Solid-mesh deck: draw its triangles with this deck's camera and the
+        // same composite opacity the splat branch would have used, then skip
+        // the splat draw entirely for this deck.
+        if (deckRendersSolidMesh(k)) {
+          // Strobe alpha only: the crossfade is already in the mesh's scale.
+          drawDeckMesh(renderer, k, cam, k === 'a' ? strobeAlphaBaseA : strobeAlphaBaseB);
+          continue;
         }
 
         if (mesh) {
@@ -4423,6 +5234,10 @@ async function rebuildViewerBuffers() {
   updateGlobalBounds();
   await makeViewer();
   reapplyHdri();
+  // The viewer (and its renderer) is rebuilt here, so any environment map the
+  // solid meshes hold belongs to a dead GL context — regenerate and re-attach.
+  disposeDefaultMeshEnv();
+  refreshDeckMeshEnvironments();
   
   try {
     const buffers = [];
@@ -4455,6 +5270,7 @@ async function rebuildViewerBuffers() {
           if (buf) { buffers.push(buf); options.push({ 'splatAlphaRemovalThreshold': 5 }); numRollChunksA++; }
         }
       }
+      rebuildDeckMeshChunks('a', chunksA, numRollChunksA);
     }
 
     if (sceneB) {
@@ -4476,6 +5292,7 @@ async function rebuildViewerBuffers() {
           if (buf) { buffers.push(buf); options.push({ 'splatAlphaRemovalThreshold': 5 }); numRollChunksB++; }
         }
       }
+      rebuildDeckMeshChunks('b', chunksB, numRollChunksB);
     }
 
     if (sceneC) {
@@ -4490,6 +5307,7 @@ async function rebuildViewerBuffers() {
           numChunksC++;
         }
       }
+      rebuildDeckMeshChunks('c', chunksC, 0);
     }
 
     if (sceneD) {
@@ -4504,6 +5322,7 @@ async function rebuildViewerBuffers() {
           numChunksD++;
         }
       }
+      rebuildDeckMeshChunks('d', chunksD, 0);
     }
 
     if (buffers.length === 0) return;
@@ -4790,6 +5609,11 @@ async function rebuildViewerBuffers() {
     
     reconnectOutputStream();
 
+    // The splat material's FX uniforms are created just above, after the mesh
+    // chunks were built — re-point the mesh materials at them now so the FX
+    // knobs drive mesh and splats from the same objects.
+    refreshDeckMeshFxUniforms();
+
     if (statusEl) statusEl.textContent = "Ready.";
   } catch (err) {
     console.error('addSplatBuffers error:', err);
@@ -4843,12 +5667,60 @@ function encodeUncompressedSplatArray(splatArray) {
   return new SplatData(out);
 }
 
+// Extensions the decks will attempt to open, shared by the file inputs and the
+// drag-and-drop filter. `.webp` is dual-purpose: part of an unbundled SOG when
+// it arrives alongside meta.json, otherwise a plain image for the backend.
+const SUPPORTED_EXTS = ['.ply', '.splat', '.ksplat', '.sog', '.ssog', '.spz', '.png', '.jpg', '.jpeg', '.webp', ...MESH_EXTS];
+// Companion files that are never loaded on their own but must survive the
+// drag-and-drop filter: SOG metadata, mesh materials, glTF buffers/textures.
+const COMPANION_EXTS = ['.json', '.mtl', '.bin', '.ktx2', '.tga', '.bmp'];
+
+function isSupportedSceneFile(name) {
+  const n = (name || '').toLowerCase();
+  return SUPPORTED_EXTS.some((ext) => n.endsWith(ext));
+}
+
+// ── Parse a picked/dropped selection into SplatData ────
+// A selection is normally one file, but an unbundled SOG export is a whole
+// folder (meta.json + .webp textures) and has to be decoded as a set.
+// Returns { scene, meshObject }: meshObject is the real triangle mesh when the
+// selection was a polygon model, so the deck can render it solid.
+async function loadFilesToSplatData(files) {
+  const list = Array.from(files || []).filter(Boolean);
+  if (!list.length) throw new Error('No file selected');
+
+  if (list.length > 1 || list.some((f) => f.name.toLowerCase().endsWith('.json'))) {
+    if (looksLikeUnbundledSog(list)) {
+      const out = await decodeSogFromFiles(list);
+      return { scene: new SplatData(out), meshObject: null };
+    }
+  }
+
+  // A polygon mesh keeps its geometry (for solid rendering) and is also sampled
+  // into splats. It gets the rest of the selection so .mtl / .bin / texture
+  // files resolve.
+  const mesh = list.find((f) => isMeshFile(f.name));
+  if (mesh) {
+    const object = await loadMeshObject(mesh, list);
+    const count = solidMeshMode ? MESH_PROXY_SAMPLES : MESH_SPLAT_SAMPLES;
+    const out = sampleObjectToSplatBytes(object, { count });
+    return { scene: new SplatData(out), meshObject: object };
+  }
+
+  // Otherwise the first recognised scene file wins (a stray .DS_Store or a
+  // preview image dropped alongside the model shouldn't hijack the load).
+  const file = list.find((f) => isSupportedSceneFile(f.name)) || list[0];
+  return { scene: await loadFileToSplatData(file), meshObject: null };
+}
+
 // ── Parse file into SplatData ──────────────────────────
 async function loadFileToSplatData(file) {
   const fileName = file.name.toLowerCase();
 
-  // If it's an image, send to local python backend for 3D reconstruction
-  if (fileName.endsWith('.png') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
+  // If it's an image, send to local python backend for 3D reconstruction.
+  // A lone .webp lands here too — as part of a SOG it would have been routed
+  // to the unbundled decoder by loadFilesToSplatData before reaching this point.
+  if (fileName.endsWith('.png') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.webp')) {
     const formData = new FormData();
     formData.append('file', file);
     
@@ -4991,12 +5863,60 @@ async function loadFileToSplatData(file) {
     return new SplatData(out);
   }
 
-  throw new Error('Unsupported format. Supported extensions: .ply, .splat, .ksplat, .sog, .ssog, .png, .jpg, .jpeg');
+  // ── .spz support (Niantic SPZ v2) ────────────────────────────────────────
+  // Gzipped header + packed position/alpha/colour/scale/rotation arrays.
+  // decodeSpz() inflates and dequantizes them into the 32-byte layout;
+  // higher-order SH is ignored, matching the .sog path.
+  if (fileName.endsWith('.spz')) {
+    const out = decodeSpz(buffer);
+    return new SplatData(out);
+  }
+
+  // Polygon meshes never reach here: loadFilesToSplatData routes them to the
+  // mesh loader so the deck can keep the real geometry for solid rendering.
+
+  throw new Error(`Unsupported format. Supported extensions: ${SUPPORTED_EXTS.join(', ')} (a .webp is only a splat when loaded together with its SOG meta.json)`);
 }
 
 // Old handlers removed.
 
 // ── Drag & Drop files directly to Decks ────────────────
+/** Read one level of a dropped directory entry (SOG exports are flat). */
+function readDirEntry(dirEntry) {
+  return new Promise((resolve) => {
+    const reader = dirEntry.createReader();
+    const found = [];
+    const readBatch = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) { resolve(found); return; }
+        found.push(...batch);
+        readBatch(); // readEntries returns at most 100 entries per call
+      }, () => resolve(found));
+    };
+    readBatch();
+  });
+}
+
+/** Collect the dropped files, expanding a dropped folder into its contents. */
+async function filesFromDrop(dataTransfer) {
+  const items = Array.from(dataTransfer.items || []);
+  const dirEntries = items
+    .map((it) => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null))
+    .filter((entry) => entry && entry.isDirectory);
+
+  if (!dirEntries.length) return Array.from(dataTransfer.files || []);
+
+  const files = [];
+  for (const dir of dirEntries) {
+    const entries = await readDirEntry(dir);
+    for (const entry of entries) {
+      if (!entry.isFile) continue;
+      files.push(await new Promise((res, rej) => entry.file(res, rej)));
+    }
+  }
+  return files;
+}
+
 function setupDragAndDrop(elementId, fileInput) {
   const element = document.querySelector(`#${elementId}`);
   element.addEventListener('dragover', (e) => {
@@ -5006,17 +5926,24 @@ function setupDragAndDrop(elementId, fileInput) {
   element.addEventListener('dragleave', () => {
     element.style.background = 'rgba(10, 10, 14, 0.6)';
   });
-  element.addEventListener('drop', (e) => {
+  element.addEventListener('drop', async (e) => {
     e.preventDefault();
     element.style.background = 'rgba(10, 10, 14, 0.6)';
-    const file = e.dataTransfer.files[0];
-    const n = file?.name.toLowerCase();
-    if (file && (n.endsWith('.ply') || n.endsWith('.splat') || n.endsWith('.ksplat') || n.endsWith('.sog') || n.endsWith('.ssog') || n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg'))) {
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(file);
-      fileInput.files = dataTransfer.files;
-      fileInput.dispatchEvent(new Event('change'));
-    }
+
+    // webkitGetAsEntry() is only valid synchronously, so grab the entries
+    // before the first await inside filesFromDrop().
+    const dropped = await filesFromDrop(e.dataTransfer);
+    // Companion files are kept so SOG folders and mesh+material sets survive.
+    const usable = dropped.filter((f) => {
+      const n = f.name.toLowerCase();
+      return isSupportedSceneFile(n) || COMPANION_EXTS.some((ext) => n.endsWith(ext));
+    });
+    if (!usable.length) return;
+
+    const dataTransfer = new DataTransfer();
+    for (const f of usable) dataTransfer.items.add(f);
+    fileInput.files = dataTransfer.files;
+    fileInput.dispatchEvent(new Event('change'));
   });
 }
 setupDragAndDrop('deck-a', fileInputA);
@@ -5171,7 +6098,12 @@ document.addEventListener('change', async (e) => {
 
 // ── Real-Time Update Execution ─────────────────────────
 function triggerRealtimeUpdate() {
-  if (!sceneA) return;
+  // Any loaded deck is reason enough to update. This used to require deck A, so
+  // a session that only had deck B (or C/D) loaded never ran the pipeline at
+  // all: the animation loop kept calling this and it kept returning, leaving the
+  // cut-up animation, FX and loops frozen. performRealtimeUpdate() guards each
+  // deck's section on its own scene, so unloaded decks stay skipped.
+  if (!sceneA && !sceneB && !sceneC && !sceneD) return;
   if (updateInProgress) {
     updatePending = true;
     return;
@@ -5203,6 +6135,10 @@ function pseudoRandom(seed, index) {
 }
 
 async function performRealtimeUpdate() {
+  // Test hook: counts pipeline passes. The gate in triggerRealtimeUpdate() used
+  // to require deck A, which froze deck-B-only sessions; a test watches this
+  // counter advance to keep that from coming back.
+  window.__rtuCount = (window.__rtuCount || 0) + 1;
   if (!viewer) {
     scheduleFrame(performRealtimeUpdate);
     return;
@@ -5587,7 +6523,7 @@ async function performRealtimeUpdate() {
       currentScalesA[i] += (targetScaleFactor - currentScalesA[i]) * 0.15;
       splatScene.visible = targetVisible;
 
-      const scaleA = targetDist / boundsA.maxDist;
+      const scaleA = (targetDist / boundsA.maxDist) * deckFrameFit('a');
       const activeScale = Math.max(0.0001, currentScalesA[i] * scaleA * beatScaleMult);
       
       let finalScale = activeScale;
@@ -5706,7 +6642,7 @@ async function performRealtimeUpdate() {
       currentScalesB[i] += (targetScaleFactor - currentScalesB[i]) * 0.15;
       splatScene.visible = targetVisible;
 
-      const scaleB = targetDist / boundsB.maxDist;
+      const scaleB = (targetDist / boundsB.maxDist) * deckFrameFit('b');
       const activeScale = Math.max(0.0001, currentScalesB[i] * scaleB * beatScaleMult);
       
       let finalScale = activeScale;
@@ -5800,7 +6736,7 @@ async function performRealtimeUpdate() {
       currentScalesC[i] += (targetScaleFactor - currentScalesC[i]) * 0.15;
       splatScene.visible = isPlayingC ? targetVisible : (currentScalesC[i] > 0.01);
 
-      const scaleC = targetDist / boundsC.maxDist;
+      const scaleC = (targetDist / boundsC.maxDist) * deckFrameFit('c');
       const activeScale = Math.max(0.0001, currentScalesC[i] * scaleC);
 
       // #9: Pitch extreme (master FX) adds to the per-chunk rotation chaos.
@@ -5879,7 +6815,7 @@ async function performRealtimeUpdate() {
       currentScalesD[i] += (targetScaleFactor - currentScalesD[i]) * 0.15;
       splatScene.visible = isPlayingD ? targetVisible : (currentScalesD[i] > 0.01);
 
-      const scaleD = targetDist / boundsD.maxDist;
+      const scaleD = (targetDist / boundsD.maxDist) * deckFrameFit('d');
       const activeScale = Math.max(0.0001, currentScalesD[i] * scaleD);
 
       // #9: Pitch extreme (master FX) adds to the per-chunk rotation chaos.
@@ -5908,6 +6844,9 @@ async function performRealtimeUpdate() {
       }
     }
 
+    // Solid meshes ride along with their deck's first chunk, so jog, play spin,
+    // volume scaling and framing move them exactly as they move the splats.
+    syncDeckMeshTransforms();
   } catch (err) {
     console.error('Realtime update error:', err);
     statusEl.textContent = `Mixer error: ${err.message}`;
@@ -6042,6 +6981,7 @@ btnReset.addEventListener('click', async () => {
   sceneB = null; rawSceneB = null;
   sceneC = null; rawSceneC = null;
   sceneD = null; rawSceneD = null;
+  for (const L of ['a', 'b', 'c', 'd']) disposeDeckMesh(L);
 
   for (const L of ['a', 'b', 'c', 'd']) {
     const nameEl = document.getElementById(`file-${L}-name`);
@@ -6136,12 +7076,37 @@ function bindDeckEvents(deckLetter) {
   const btnLoad = document.getElementById(`btn-load-${L}`);
   if (fileInput) {
     fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      if (fileNameEl) fileNameEl.textContent = file.name;
-      statusEl.textContent = `Loading ${file.name} to Deck ${U}...`;
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      // A multi-file selection is a mesh with its materials or an unbundled
+      // SOG folder: name it after the file that actually gets loaded, falling
+      // back to the containing folder for SOG (where no single file is "it").
+      const folder = (files[0].webkitRelativePath || '').split('/')[0];
+      const primary = looksLikeUnbundledSog(files)
+        ? null
+        : (files.find((f) => isMeshFile(f.name)) || files.find((f) => isSupportedSceneFile(f.name)));
+      const label = files.length === 1
+        ? files[0].name
+        : (primary?.name || folder || `${files.length} files`);
+      if (fileNameEl) fileNameEl.textContent = label;
+      statusEl.textContent = `Loading ${label} to Deck ${U}...`;
       try {
-        let rawScene = await loadFileToSplatData(file);
+        const loaded = await loadFilesToSplatData(files);
+        const rawScene = loaded.scene;
+
+        // Swap in (or clear) this deck's solid mesh before the rebuild, so the
+        // render pass and transform sync see a consistent deck.
+        disposeDeckMesh(L);
+        if (loaded.meshObject) {
+          deckMeshes[L] = {
+            object: loaded.meshObject,
+            group: buildDeckMeshGroup(loaded.meshObject),
+            chunks: [],
+            bounds: meshObjectBounds(loaded.meshObject),
+            opacity: -1,
+          };
+        }
+
         const defaultCount = Math.min(250000, rawScene.splatCount);
         if (slider) {
           slider.min = Math.min(250000, rawScene.splatCount);

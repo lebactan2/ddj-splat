@@ -3,7 +3,11 @@
  * Decoder for the PlayCanvas SOGS "self-organising gaussians" splat format
  * (.sog / .ssog), version 2 (generator "splat-transform v2.x").
  *
- * A .sog is a ZIP archive containing meta.json plus a set of WebP textures:
+ * Both packagings are supported:
+ *   - bundled:   a .sog/.ssog ZIP archive           -> decodeSog(arrayBuffer)
+ *   - unbundled: a folder of loose meta.json+.webp  -> decodeSogFromFiles(files)
+ *
+ * A .sog contains meta.json plus a set of WebP textures:
  *   means_l.webp, means_u.webp  — 16-bit position per axis (low + high byte)
  *   scales.webp                 — 8-bit codebook index per axis -> log scale
  *   quats.webp                  — smallest-three packed rotation quaternion
@@ -67,17 +71,39 @@ function quaternionByte(v) {
   return b;
 }
 
+/** Strip any directory prefix so zip entries and picked files key alike. */
+function baseName(path) {
+  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return i === -1 ? path : path.slice(i + 1);
+}
+
+/** Default texture names, used when meta.json omits the `files` arrays. */
+const DEFAULT_FILES = {
+  means: ['means_l.webp', 'means_u.webp'],
+  scales: ['scales.webp'],
+  quats: ['quats.webp'],
+  sh0: ['sh0.webp'],
+};
+
 /**
- * Decode a SOGS (.sog/.ssog) ArrayBuffer into a tightly packed Uint8Array
- * using the 32-byte-per-splat layout. Higher-order SH is ignored.
- * @param {ArrayBuffer} arrayBuffer
+ * Decode a SOGS bundle already split into named byte blobs.
+ * Entries may be keyed by full path (ZIP) or bare filename (picked files);
+ * lookups fall back to basename matching so nested archives still resolve.
+ * @param {Record<string, Uint8Array>} entries
  * @returns {Promise<Uint8Array>}
  */
-export async function decodeSog(arrayBuffer) {
-  const zip = unzipSync(new Uint8Array(arrayBuffer));
+export async function decodeSogEntries(entries) {
+  // Basename index for the fallback lookup path.
+  const byBase = new Map();
+  for (const key of Object.keys(entries)) {
+    const b = baseName(key).toLowerCase();
+    if (!byBase.has(b)) byBase.set(b, entries[key]);
+  }
 
-  const metaBytes = zip['meta.json'];
-  if (!metaBytes) throw new Error('SOG: meta.json not found in archive');
+  const findEntry = (name) => entries[name] ?? byBase.get(baseName(name).toLowerCase()) ?? null;
+
+  const metaBytes = findEntry('meta.json');
+  if (!metaBytes) throw new Error('SOG: meta.json not found');
   const meta = JSON.parse(new TextDecoder().decode(metaBytes));
 
   if (meta.version && meta.version !== 2) {
@@ -90,16 +116,19 @@ export async function decodeSog(arrayBuffer) {
   }
 
   const getEntry = (name) => {
-    const b = zip[name];
+    const b = findEntry(name);
     if (!b) throw new Error(`SOG: missing texture "${name}"`);
     return b;
   };
 
-  const meansLName = meta.means.files[0];
-  const meansUName = meta.means.files[1];
-  const scalesName = meta.scales.files[0];
-  const quatsName = meta.quats.files[0];
-  const sh0Name = meta.sh0.files[0];
+  const fileOf = (section, index) =>
+    meta[section]?.files?.[index] ?? DEFAULT_FILES[section][index];
+
+  const meansLName = fileOf('means', 0);
+  const meansUName = fileOf('means', 1);
+  const scalesName = fileOf('scales', 0);
+  const quatsName = fileOf('quats', 0);
+  const sh0Name = fileOf('sh0', 0);
 
   // Decode the WebP textures we need (ignore shN entirely).
   const [meansL, meansU, scalesImg, quatsImg, sh0Img] = await Promise.all([
@@ -191,4 +220,50 @@ export async function decodeSog(arrayBuffer) {
   }
 
   return out;
+}
+
+/**
+ * Decode a bundled SOGS (.sog/.ssog) ZIP archive.
+ * @param {ArrayBuffer} arrayBuffer
+ * @returns {Promise<Uint8Array>}
+ */
+export async function decodeSog(arrayBuffer) {
+  return decodeSogEntries(unzipSync(new Uint8Array(arrayBuffer)));
+}
+
+/** True if this set of picked/dropped files looks like an unbundled SOG. */
+export function looksLikeUnbundledSog(files) {
+  let hasMeta = false;
+  let hasWebp = false;
+  for (const f of files) {
+    const n = baseName(f.name).toLowerCase();
+    if (n === 'meta.json') hasMeta = true;
+    else if (n.endsWith('.webp')) hasWebp = true;
+  }
+  return hasMeta && hasWebp;
+}
+
+/**
+ * Decode an unbundled SOGS export: a loose meta.json plus its .webp textures,
+ * as produced by `splat-transform` when writing to a directory. Files are
+ * keyed by basename, so it does not matter whether they arrive from a folder
+ * pick, a multi-file selection, or a directory drop.
+ * @param {File[]|FileList} files
+ * @returns {Promise<Uint8Array>}
+ */
+export async function decodeSogFromFiles(files) {
+  const list = Array.from(files);
+  const entries = {};
+  await Promise.all(list.map(async (f) => {
+    const name = baseName(f.name).toLowerCase();
+    // Only meta.json and the textures are needed; skip everything else so a
+    // whole-folder drop containing e.g. a preview image still works.
+    if (name !== 'meta.json' && !name.endsWith('.webp')) return;
+    entries[name] = new Uint8Array(await f.arrayBuffer());
+  }));
+
+  if (!entries['meta.json']) {
+    throw new Error('SOG: no meta.json among the selected files — pick the whole SOG folder (meta.json + .webp textures), not just an image.');
+  }
+  return decodeSogEntries(entries);
 }

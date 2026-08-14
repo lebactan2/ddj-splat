@@ -6,6 +6,7 @@
 //   'ddj-flx4' — Pioneer DDJ-FLX4
 //   'ddj-200'  — Pioneer DDJ-200
 //   'idj'      — ICON iDJ
+//   'djc-diy'  — MandićLab DJC-DIY (open-source DIY controller)
 //
 // MIDI numbers sourced from:
 //   DDJ-400 : mixxxdj/mixxx Pioneer-DDJ-400.midi.xml (derived from official
@@ -16,6 +17,9 @@
 //             read straight out of that file's <control> entries)
 //   iDJ     : ICON's stock VirtualDJ device.xml (iconproaudio.com/product/idj/),
 //             verified against the physical unit (VID_1D03/PID_0027).
+//   DJC-DIY : github.com/mandiclab/djc-diy — firmware/firmware.ino (the notes/CCs
+//             the Arduino actually sends) cross-read with
+//             "mixxx mapping files/DJC-DIY.midi.xml" (what each one means).
 //
 // Channel → Deck convention (same on both controllers):
 //   ch 0 = Deck A, ch 1 = Deck B
@@ -186,6 +190,22 @@ function spinJog(elementId, midiValue, scale = 0.03) {
 
   // Dispatch a custom 'jogspin' event that main.js listens for.
   jogEl.dispatchEvent(new CustomEvent('jogspin', { detail: { delta: radianDelta } }));
+}
+
+/**
+ * Relative encoder in the *offset-64* encoding: one message per detent edge,
+ * 0x41 = one step forward, 0x3F = one step back — the magnitude never grows.
+ * spinJog() reads its data byte as a signed 7-bit count instead (0x41 → -63),
+ * which is right for controllers that send a tick count but turns a single
+ * detent into a 60-plus-unit jump on hardware like the DJC-DIY. Sign matches
+ * spinJog (forward = negative rotation) so both feel the same on screen.
+ */
+function spinJogOffset64(elementId, midiValue, scale = 0.03) {
+  if (midiValue === 64) return;             // no movement
+  const steps = 64 - midiValue;             // 0x41 → -1, 0x3F → +1
+  const jogEl = document.getElementById(elementId);
+  if (!jogEl) return;
+  jogEl.dispatchEvent(new CustomEvent('jogspin', { detail: { delta: steps * scale } }));
 }
 
 /**
@@ -616,6 +636,165 @@ const PROFILES = {
       if (cc === 0x11) spinJog('jog-b', value, 0.03);
     },
   },
+
+  // ── KORG nanoKONTROL2 ───────────────────────────────────────────────────────
+  // Factory ("CC mode") default map, all on MIDI channel 1 (channel index 0).
+  // Source: KORG nanoKONTROL2 Owner's Manual, "Control Assignments" table.
+  //
+  //   sliders 1-8   CC 0-7        knobs 1-8   CC 16-23
+  //   SOLO 1-8      CC 32-39      MUTE 1-8    CC 48-55      REC 1-8   CC 64-71
+  //   transport:    REW 43  FF 44  STOP 42  PLAY 41  REC 45  CYCLE 46
+  //   track:        ◀ 58  ▶ 59    marker:   SET 60  ◀ 61  ▶ 62
+  //
+  // Every control is a CC — the buttons included. In the factory preset they are
+  // momentary (127 on press, 0 on release), which is what clickButton() wants.
+  // If a button behaves like a latch instead, its mode was changed in the KORG
+  // Kontrol Editor; set it back to "Momentary" (or re-map it with GUIDED MAP).
+  //
+  // There is no jog wheel and no pitch fader on this controller, so the deck
+  // layout leans on the two banks of four: channels 1-4 drive deck A, 5-8 drive
+  // deck B, in both the knob row and the three button rows.
+  'nanokontrol2': {
+    handleNoteOn(channel, note, velocity) {
+      // The factory preset is CC-only; notes arrive only from a user-edited
+      // scene, in which case GUIDED MAP / MIDI Learn is the right tool.
+      void channel; void note; void velocity;
+    },
+
+    handleCC(channel, cc, value) {
+      if (channel !== 0) return;
+
+      // ── Sliders 1-8: levels ──
+      if (cc === 0) return mapSlider('vol-a', value);
+      if (cc === 1) return mapSlider('vol-b', value);
+      if (cc === 2) return mapSlider('crossfader', value);
+      if (cc === 3) return mapSlider('master-vol', value);   // master level → zoom
+      if (cc === 4) return mapSlider('fx-depth-a', value);
+      if (cc === 5) return mapSlider('fx-depth-b', value);
+      if (cc === 6) return mapSlider('fx-depth-m', value);
+      if (cc === 7) return mapSlider('tempo-a', value);
+
+      // ── Knobs 1-8: EQ + filter, deck A on 1-4, deck B on 5-8 ──
+      if (cc === 16) return mapSlider('eq-hi-a', value);
+      if (cc === 17) return mapSlider('eq-mid-a', value);
+      if (cc === 18) return mapSlider('eq-low-a', value);
+      if (cc === 19) return mapSlider('filter-a', value);
+      if (cc === 20) return mapSlider('eq-hi-b', value);
+      if (cc === 21) return mapSlider('eq-mid-b', value);
+      if (cc === 22) return mapSlider('eq-low-b', value);
+      if (cc === 23) return mapSlider('filter-b', value);
+
+      // ── SOLO row (buttons 1-8): transport + sync ──
+      if (cc === 32) return clickButton('btn-play-a', value);
+      if (cc === 33) return clickButton('btn-stop-a', value);
+      if (cc === 34) return clickButton('sync-a', value);
+      if (cc === 35) return clickButton('btn-fx-toggle-a', value);
+      if (cc === 36) return clickButton('btn-play-b', value);
+      if (cc === 37) return clickButton('btn-stop-b', value);
+      if (cc === 38) return clickButton('sync-b', value);
+      if (cc === 39) return clickButton('btn-fx-toggle-b', value);
+
+      // ── MUTE row: loops ──
+      if (cc === 48) return clickButton('loop-in-a', value);
+      if (cc === 49) return clickButton('loop-out-a', value);
+      if (cc === 50) return clickButton('loop-active-a', value);
+      if (cc === 51) return clickButton('loop-half-a', value);
+      if (cc === 52) return clickButton('loop-in-b', value);
+      if (cc === 53) return clickButton('loop-out-b', value);
+      if (cc === 54) return clickButton('loop-active-b', value);
+      if (cc === 55) return clickButton('loop-half-b', value);
+
+      // ── REC row: hot-cue pads 1-4 of each deck ──
+      if (cc >= 64 && cc <= 67) return triggerPad('a', cc - 64, value);
+      if (cc >= 68 && cc <= 71) return triggerPad('b', cc - 68, value);
+
+      // ── Transport strip: master FX + view ──
+      if (cc === 41) return clickButton('btn-play-a', value);      // PLAY
+      if (cc === 42) return clickButton('btn-stop-a', value);      // STOP
+      if (cc === 43) return clickButton('btn-beat-prev-m', value); // REW  → FX beat ÷
+      if (cc === 44) return clickButton('btn-beat-next-m', value); // FF   → FX beat ×
+      if (cc === 45) return clickButton('btn-fx-toggle-m', value); // REC  → master FX on/off
+      if (cc === 46) return clickButton('btn-reset-orient', value);// CYCLE → RESET VIEW
+
+      // ── Track / marker: FX selection ──
+      if (cc === 58 && value > 0) return cycleSelect('fx-select-a');
+      if (cc === 59 && value > 0) return cycleSelect('fx-select-b');
+      if (cc === 60 && value > 0) return cycleSelect('fx-select-m');
+      if (cc === 61) return clickButton('loop-double-a', value);
+      if (cc === 62) return clickButton('loop-double-b', value);
+    },
+  },
+
+  // ── MandićLab DJC-DIY ───────────────────────────────────────────────────────
+  // Open-source DIY controller (Arduino Pro Micro + MIDIUSB):
+  // https://github.com/mandiclab/djc-diy
+  //
+  // Numbers taken from the two authoritative files in that repo:
+  //   firmware/firmware.ino              — what the hardware actually emits
+  //   mixxx mapping files/DJC-DIY.midi.xml — what each control means
+  //
+  // Everything is on MIDI channel 1 (channel index 0); the firmware hardcodes
+  // 0x90 / 0x80 / 0xB0 with no channel offset. Decks are split by note/CC
+  // number, not by channel (like the iDJ).
+  //
+  // Hardware inventory (the whole device — there is nothing else to map):
+  //   notes 0x3C-0x41  6 push buttons on digital pins
+  //   notes 0x42-0x43  2 push buttons on the A6 resistor ladder
+  //   CC 0x0A-0x10     7 potentiometers (2 tempo faders, crossfader, 4 knobs)
+  //   CC 0x14/0x15     2 rotary encoders, relative: 0x41 = fwd, 0x3F = back
+  //
+  // Note↔function assignment looks scrambled because the panel wiring order
+  // doesn't follow the pin order — it is copied verbatim from the Mixxx XML:
+  //   Deck 1: play 0x43, cue 0x42, pads 0x3C/0x3D
+  //   Deck 2: play 0x3F, cue 0x40, pads 0x41/0x3E
+  //
+  // The Mixxx map declares <invert/> on both tempo faders and the crossfader,
+  // so those three are flipped here too (127 - value).
+  //
+  // The device has no volume faders, no hi/mid EQ, no loop buttons and no FX
+  // section, so those app controls stay on-screen (or bind spare... there are no
+  // spare controls — every button, pot and encoder is already used).
+  'djc-diy': {
+    handleNoteOn(channel, note, velocity) {
+      if (channel !== 0) return;
+
+      // ── Deck 1 → Deck A ──
+      if (note === 0x43) clickButton('btn-play-a', velocity);  // Play/Pause
+      if (note === 0x42) clickButton('btn-stop-a', velocity);  // Cue → Stop
+      if (note === 0x3c) triggerPad('a', 0, velocity);         // Perf pad 1
+      if (note === 0x3d) triggerPad('a', 1, velocity);         // Perf pad 2
+
+      // ── Deck 2 → Deck B ──
+      if (note === 0x3f) clickButton('btn-play-b', velocity);  // Play/Pause
+      if (note === 0x40) clickButton('btn-stop-b', velocity);  // Cue → Stop
+      if (note === 0x41) triggerPad('b', 0, velocity);         // Perf pad 1
+      if (note === 0x3e) triggerPad('b', 1, velocity);         // Perf pad 2
+    },
+
+    handleCC(channel, cc, value) {
+      if (channel !== 0) return;
+
+      // ── Jog wheels (relative encoders) → scratch ──
+      // The firmware emits one message per edge of the encoder's A pin with a
+      // fixed 0x41 / 0x3F payload, so this needs the offset-64 decode, not
+      // spinJog's signed-count one. A typical EC11 (20 detents, both edges
+      // counted) gives ~40 messages per wheel revolution; 0.15 rad each makes
+      // one turn of the wheel ≈ one turn of the model.
+      if (cc === 0x14) spinJogOffset64('jog-a', value, 0.15);
+      if (cc === 0x15) spinJogOffset64('jog-b', value, 0.15);
+
+      // ── Tempo faders (inverted per the Mixxx map) ──
+      if (cc === 0x0e) mapSlider('tempo-a', 127 - value);
+      if (cc === 0x10) mapSlider('tempo-b', 127 - value);
+
+      // ── Mixer ──
+      if (cc === 0x0f) mapSlider('crossfader', 127 - value);   // inverted
+      if (cc === 0x0d) mapSlider('eq-low-a', value);           // Deck 1 low EQ
+      if (cc === 0x0b) mapSlider('eq-low-b', value);           // Deck 2 low EQ
+      if (cc === 0x0c) mapSlider('filter-a', value);           // Deck 1 QuickEffect super1
+      if (cc === 0x0a) mapSlider('filter-b', value);           // Deck 2 QuickEffect super1
+    },
+  },
 };
 
 // ── Beat FX target state (FLX4) ───────────────────────────────────────────────
@@ -745,6 +924,13 @@ export const APP_ACTIONS = {
   'jog-a': { kind: 'jog', el: 'jog-a', scale: 0.03 },
   'jog-b': { kind: 'jog', el: 'jog-b', scale: 0.03 },
 
+  // Encoder-style jogs: one message per detent, fixed 0x41 / 0x3F payload (the
+  // DJC-DIY and most DIY Arduino builds). Bind these instead of the pair above
+  // when re-mapping such a controller — the plain 'jog-*' decode would read a
+  // single detent as a ~63-tick sweep.
+  'jog-a-encoder': { kind: 'jogEnc', el: 'jog-a', scale: 0.15 },
+  'jog-b-encoder': { kind: 'jogEnc', el: 'jog-b', scale: 0.15 },
+
   // ── HDRI environment scrub ──
   'hdri': { kind: 'selectScrub', el: 'hdri-select' },
 
@@ -793,6 +979,9 @@ export function runAction(actionId, value, isNote) {
       break;
     case 'jog':
       spinJog(action.el, value, action.scale ?? 0.03);
+      break;
+    case 'jogEnc':
+      spinJogOffset64(action.el, value, action.scale ?? 0.03);
       break;
     case 'pad':
       // Pads need both down (velocity > 0) and up (velocity 0) — pass through.
@@ -991,8 +1180,8 @@ let activeProfileObj = PROFILES['ddj-flx4'];
 
 /**
  * Switch the active MIDI profile.
- * @param {string} name  A built-in ('ddj-400' | 'ddj-flx4' | 'ddj-200' | 'idj')
- *                       or a saved custom profile name.
+ * @param {string} name  A built-in ('ddj-400' | 'ddj-flx4' | 'ddj-200' | 'idj' |
+ *                       'nanokontrol2' | 'djc-diy') or a saved custom profile name.
  */
 export function setMidiProfile(name) {
   if (PROFILES[name]) {
@@ -1078,8 +1267,8 @@ function getMIDIMessage(message) {
 
 /**
  * Guess the matching built-in profile from a MIDI input's device name.
- * Returns a profile key ('ddj-400' | 'ddj-flx4' | 'ddj-200' | 'idj') or null if
- * unrecognized. FLX4 and the DDJ-200 are checked first so neither falls through
+ * Returns a profile key ('ddj-400' | 'ddj-flx4' | 'ddj-200' | 'idj' |
+ * 'nanokontrol2' | 'djc-diy') or null if unrecognized. FLX4 and the DDJ-200 are checked first so neither falls through
  * to the looser "400" test.
  */
 function profileFromDeviceName(name) {
@@ -1089,6 +1278,14 @@ function profileFromDeviceName(name) {
   if (n.includes('DDJ-200') || n.includes('DDJ200')) return 'ddj-200';
   if (n.includes('DDJ-400') || n.includes('DDJ400') || n.includes('400')) return 'ddj-400';
   if (n.includes('IDJ') || n.includes('ICON')) return 'idj';
+  // KORG reports the port as "nanoKONTROL2 SLIDER/KNOB" (or "nanoKONTROL2 CTRL").
+  if (n.includes('NANOKONTROL2') || n.includes('NANO KONTROL2')) return 'nanokontrol2';
+  // DJC-DIY: the stock firmware doesn't override the USB product string, so the
+  // port shows up under the board's own name ("Arduino Micro", "Arduino
+  // Leonardo", "SparkFun Pro Micro"). Checked last so a board flashed with some
+  // other sketch is the only thing this can mis-claim.
+  if (n.includes('DJC-DIY') || n.includes('DJC DIY') || n.includes('DJCDIY')) return 'djc-diy';
+  if (n.includes('ARDUINO MICRO') || n.includes('ARDUINO LEONARDO') || n.includes('PRO MICRO')) return 'djc-diy';
   return null;
 }
 
