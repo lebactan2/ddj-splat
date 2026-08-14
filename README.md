@@ -140,7 +140,9 @@ Set-up-time controls — deck layout (2 / 4 decks), REMOVE BG, SOLID MESH, COLAB
 with its `loca.lt` URL field, and EXPORT — sit in the **ADVANCED** dropdown in
 the header instead of the top strip, so the strip stays a performance surface.
 Click to open; it closes on an outside click or Escape, and stays open while you
-work through the checkboxes and the URL field.
+work through the checkboxes and the URL field. The panel is rendered on `<body>`
+and placed under the button by script — the header's `backdrop-filter` would
+otherwise clip it and trap its z-index behind the bar.
 
 ## Hover hints
 

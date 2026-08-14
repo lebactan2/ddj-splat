@@ -1396,7 +1396,10 @@ appDiv.innerHTML = `
          behaves exactly as it did inline. -->
     <div style="position:relative;">
       <button id="btn-advanced" class="util-btn" style="margin:0;">ADVANCED ▾</button>
-      <div id="advanced-menu" style="display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:99998; background:#0d0d12; border:1px solid #7c3aed; border-radius:6px; padding:10px; box-shadow:0 6px 20px rgba(0,0,0,0.7); min-width:190px;">
+      <!-- position:fixed, placed by JS: the header scrolls horizontally
+           (overflow-x on .panel-top), which would clip an absolutely
+           positioned child to the bar. -->
+      <div id="advanced-menu" style="display:none; position:fixed; top:0; left:0; z-index:99998; background:#0d0d12; border:1px solid #7c3aed; border-radius:6px; padding:10px; box-shadow:0 6px 20px rgba(0,0,0,0.7); min-width:190px;">
         <button id="btn-layout-toggle" class="util-btn" style="background:#10b981; margin:0 0 8px; width:100%;">LAYOUT: 2 DECKS</button>
 
         <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:6px; cursor:pointer; padding:3px 0;">
@@ -2749,12 +2752,37 @@ window.addEventListener('midi-profile-autodetected', (e) => {
   const menu = document.getElementById('advanced-menu');
   if (!btn || !menu) return;
 
+  // Re-home the panel on <body>. The header carries backdrop-filter, which makes
+  // it the containing block for position:fixed descendants *and* clips them to
+  // the bar — so while the panel lived inside the header it was hidden behind
+  // it on wide windows. Only its DOM parent changes; ids and handlers stay.
+  document.body.appendChild(menu);
+
   const isOpen = () => menu.style.display !== 'none';
+
+  /** Park the panel under the button, nudged back on screen if it would spill. */
+  const place = () => {
+    const b = btn.getBoundingClientRect();
+    menu.style.left = '0px';
+    menu.style.top = '0px';
+    const m = menu.getBoundingClientRect();
+    const left = Math.max(6, Math.min(b.left, window.innerWidth - m.width - 6));
+    const top = (b.bottom + 6 + m.height > window.innerHeight)
+      ? Math.max(6, b.top - 6 - m.height)
+      : b.bottom + 6;
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  };
+
   const setOpen = (open) => {
     menu.style.display = open ? 'block' : 'none';
+    if (open) place();
     btn.textContent = open ? 'ADVANCED ▴' : 'ADVANCED ▾';
     btn.style.background = open ? '#7c3aed' : '';
   };
+
+  // The header wraps to a second row on narrow windows, so the button moves.
+  window.addEventListener('resize', () => { if (isOpen()) place(); });
 
   btn.addEventListener('click', (e) => {
     e.stopPropagation();

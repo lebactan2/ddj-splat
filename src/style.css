@@ -63,13 +63,16 @@ body, html {
   pointer-events: none;
 }
 
-/* 2-deck mode: the bottom half of each side is empty (that's where decks C/D go
-   in 4-deck mode), so the deck panel runs the full height of the window. It used
-   to stop at 50% regardless, which clipped the bottom row of pads on anything
-   shorter than ~750px. layout-4deck below puts the 50% height back. */
+/* 2-deck mode: the panel is sized by its own contents and stops just under the
+   pads, rather than being pinned to a fixed fraction of the window. It used to
+   be locked to 50% height, which clipped the bottom row of pads on anything
+   shorter than ~750px; stretching it to the floor instead left a tall empty
+   column under the pads. max-height keeps it inside the window on short
+   screens. layout-4deck below puts the fixed 50% height back. */
 .panel-left {
-  top: 16px; bottom: 16px; left: 16px;
+  top: 16px; bottom: auto; left: 16px;
   width: var(--deck-w); height: auto;
+  max-height: calc(100% - 32px);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -79,8 +82,9 @@ body, html {
 }
 
 .panel-right {
-  top: 16px; bottom: 16px; right: 16px;
+  top: 16px; bottom: auto; right: 16px;
   width: var(--deck-w); height: auto;
+  max-height: calc(100% - 32px);
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;

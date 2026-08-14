@@ -53,6 +53,25 @@ const MOVED = ['btn-layout-toggle', 'chk-remove-bg', 'chk-solid-mesh',
   const label = await page.$eval('#btn-advanced', (el) => el.textContent);
   expect('the button shows its open state', label.includes('▴'), label);
 
+  // The header carries backdrop-filter, which both clips position:fixed children
+  // and traps their z-index — the panel was invisible behind the bar until it
+  // was re-homed on <body>. Hit-test it rather than trusting the styles.
+  const stacking = await page.evaluate(() => {
+    const m = document.getElementById('advanced-menu').getBoundingClientRect();
+    const hits = [[0.5, 0.1], [0.5, 0.5], [0.5, 0.95]].map(([fx, fy]) =>
+      !!document.elementFromPoint(m.left + m.width * fx, m.top + m.height * fy)
+        ?.closest('#advanced-menu'));
+    return {
+      hits,
+      onScreen: m.left >= 0 && m.top >= 0
+        && m.right <= window.innerWidth && m.bottom <= window.innerHeight,
+      parent: document.getElementById('advanced-menu').parentElement.tagName,
+    };
+  });
+  expect('the open panel is the top-most thing at every point inside it',
+    stacking.hits.every(Boolean), JSON.stringify(stacking));
+  expect('the panel sits fully inside the window', stacking.onScreen, JSON.stringify(stacking));
+
   // ── controls work from inside, and using them does not close the menu ─────
   // Controls inside the menu are driven with element.click() rather than the
   // mouse: puppeteer scrolls a target into view before a real click, and that

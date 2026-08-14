@@ -24,12 +24,17 @@ const measure = (page) => page.evaluate(() => {
       return b.height > 0 && b.top >= pb.top - 0.5 && b.bottom <= pb.bottom + 0.5
         && b.bottom <= window.innerHeight;
     }).length;
+    const grid = panel.querySelector('.pads-grid').getBoundingClientRect();
     return {
       deck: panel.id,
       inside,
       total: pads.length,
       // >0 means the panel is hiding content behind its overflow:hidden.
       clipped: Math.max(0, Math.round(panel.scrollHeight - panel.clientHeight)),
+      // The column ends just under the pads — it neither stops short of them
+      // nor runs on to the bottom of the window.
+      gapUnderPads: Math.round(pb.bottom - grid.bottom),
+      slackToFloor: Math.round(window.innerHeight - pb.bottom),
     };
   });
 });
@@ -54,6 +59,8 @@ const measure = (page) => page.evaluate(() => {
       expect(`${w}x${h}: ${d.deck} shows all ${d.total} pads`,
         d.inside === d.total && d.total === 8, JSON.stringify(d));
       expect(`${w}x${h}: ${d.deck} clips nothing`, d.clipped === 0, `${d.clipped}px hidden`);
+      expect(`${w}x${h}: ${d.deck} ends just under its pads`,
+        d.gapUnderPads >= 0 && d.gapUnderPads <= 40, `${d.gapUnderPads}px below the pads`);
     }
     await page.close();
   }
