@@ -2764,6 +2764,12 @@ window.addEventListener('midi-profile-autodetected', (e) => {
 // the master strip; the whole pass switches off while every knob is at zero, so
 // an untouched bank costs nothing.
 
+/** Keep the shader's aspect in step with the canvas so wedges/tiles stay square. */
+function updateHydraAspect(w, h) {
+  if (!hydraPass) return;
+  hydraPass.uniforms.uAspect.value = (w || 1) / Math.max(1, h || 1);
+}
+
 /** Push the cached amounts into the pass and enable/disable it accordingly. */
 function syncHydraPassFromKnobs() {
   if (!hydraPass) return;
@@ -5483,10 +5489,10 @@ function setupPostProcessingAndLensFlare() {
   composer.addPass(copyPass);
 
   viewer.render = function() {
-    // scroll / modulate animate off wall-clock time; aspect keeps wedges square
+    // scroll / modulate animate off wall-clock time. uAspect is not set here:
+    // it only changes on resize, and this runs every frame.
     if (hydraPass && hydraPass.enabled) {
       hydraPass.uniforms.uTime.value = performance.now() * 0.001;
-      hydraPass.uniforms.uAspect.value = window.innerWidth / Math.max(1, window.innerHeight);
     }
     composer.render();
     // The renderPass may have detected a change in actively-rendered deck count
@@ -5502,7 +5508,10 @@ function setupPostProcessingAndLensFlare() {
   viewer.renderer.setSize = function (w, h, updateStyle) {
     originalResize.call(this, w, h, updateStyle);
     composer.setSize(w, h);
+    updateHydraAspect(w, h);
   };
+  updateHydraAspect(viewer.renderer.domElement.clientWidth || window.innerWidth,
+                    viewer.renderer.domElement.clientHeight || window.innerHeight);
 
   // The composer captured the renderer's pixel ratio at construction; re-apply
   // the current adaptive notch so both renderer and composer stay in sync
@@ -6866,6 +6875,12 @@ async function performRealtimeUpdate() {
     // Apply fast GPU transforms and visibility to Scene B
     const totalChunksB = numChunksB + numRollChunksB;
     for (let i = 0; i < totalChunksB; i++) {
+      // Bounds check, as decks A/C/D already do. getSplatScene() THROWS on an
+      // out-of-range index rather than returning null, and the chunk counts run
+      // ahead of the viewer's scene list for a frame or two whenever an FX that
+      // adds chunks (roll, spiral) is switched — which aborted the whole
+      // realtime update with "SplatMesh::getScene() -> Invalid scene index".
+      if (splatMesh && sceneIdx >= sceneCount) break;
       const splatScene = viewer.getSplatScene(sceneIdx++);
       if (!splatScene) continue;
       if (!sceneB) { splatScene.visible = false; continue; } // deck unloaded — hide lingering scenes
