@@ -46,6 +46,23 @@ export function setMidiLearn(enabled, sinkFn) {
   console.log(`[MIDI] MIDI-Learn ${enabled ? 'ON' : 'OFF'}`);
 }
 
+// ── Capture mode (used to derive "which MIDI control drives this?") ──────────
+//
+// The built-in profiles are handler *functions*, not tables, so there is no
+// declarative map to read a reverse lookup out of. Instead we run every possible
+// message through a profile with the helpers below short-circuited into a
+// recorder: whatever the handler tried to touch is reported instead of done.
+// buildProfileMidiMap() drives that sweep. While `_capture` is an array the
+// module performs no DOM work at all.
+let _capture = null;
+
+/** In capture mode: record what this helper *would* have driven, and skip it. */
+function _rec(key) {
+  if (!_capture) return false;
+  _capture.push(key);
+  return true;
+}
+
 // ── Debounce map for mapSlider ────────────────────────────────────────────────
 // Keyed by elementId. Each entry is a timer id for the pending 'change' dispatch.
 const _changeTimers = {};
@@ -73,6 +90,7 @@ const DEADZONE = 2.5;      // ignore changes smaller than this (in 0-127 units) 
  * rebuildViewerBuffers) fire once when the user stops moving, not on every tick.
  */
 function mapSlider(elementId, midiValue) {
+  if (_rec(`el:${elementId}`)) return;
   const el = document.getElementById(elementId);
   if (!el) return;
 
@@ -141,6 +159,7 @@ function mapSlider(elementId, midiValue) {
  * Dispatches a 'change' event so the app reacts.
  */
 function cycleSelect(elementId) {
+  if (_rec(`el:${elementId}`)) return;
   const el = document.getElementById(elementId);
   if (!el) return;
   const n = el.options.length;
@@ -154,6 +173,7 @@ function cycleSelect(elementId) {
  * and dispatch 'change'.  Used for Mic Level knob → HDRI scrubbing.
  */
 function mapSelectByValue(elementId, midiValue) {
+  if (_rec(`el:${elementId}`)) return;
   const el = document.getElementById(elementId);
   if (!el) return;
   const n = el.options.length;
@@ -167,6 +187,7 @@ function mapSelectByValue(elementId, midiValue) {
 
 /** Simulate a button click (only trigger on Note On: velocity > 0). */
 function clickButton(elementId, velocity) {
+  if (_rec(`el:${elementId}`)) return;
   if (velocity > 0) {
     const el = document.getElementById(elementId);
     if (el) el.click();
@@ -180,6 +201,7 @@ function clickButton(elementId, velocity) {
  * Increase towards 0.05 for a heavier, more physical feel; lower to 0.015 for precision.
  */
 function spinJog(elementId, midiValue, scale = 0.03) {
+  if (_rec(`el:${elementId}`)) return;
   const delta = midiValue < 64 ? midiValue : -(128 - midiValue);
   // scale rad/tick. Top-plate scratch uses ~0.03 (responsive); the side/bend
   // ring uses a much smaller scale for fine micro-nudges.
@@ -201,6 +223,7 @@ function spinJog(elementId, midiValue, scale = 0.03) {
  * spinJog (forward = negative rotation) so both feel the same on screen.
  */
 function spinJogOffset64(elementId, midiValue, scale = 0.03) {
+  if (_rec(`el:${elementId}`)) return;
   if (midiValue === 64) return;             // no movement
   const steps = 64 - midiValue;             // 0x41 → -1, 0x3F → +1
   const jogEl = document.getElementById(elementId);
@@ -214,6 +237,7 @@ function spinJogOffset64(elementId, midiValue, scale = 0.03) {
  * clicking the DOM pad). Falls back to the DOM pad if the hook isn't present.
  */
 function triggerPad(deckStr, padIndex, velocity) {
+  if (_rec(`pad:${deckStr}:${padIndex}`)) return;
   // Pad-mode aware router (Hot Cue → loops, Beat Loop → camera, etc.).
   if (typeof window !== 'undefined' && typeof window._handleDeckPad === 'function') {
     window._handleDeckPad(deckStr, padIndex, velocity);
@@ -237,6 +261,7 @@ function triggerPad(deckStr, padIndex, velocity) {
 
 /** Trigger a camera viewpoint preset on the rig (deck A/B, preset 0-7). */
 function triggerCam(deckStr, presetIndex, velocity) {
+  if (_rec(`cam:${deckStr}:${presetIndex}`)) return;
   if (velocity <= 0) return;
   if (typeof window !== 'undefined' && typeof window._setDeckCamPreset === 'function') {
     window._setDeckCamPreset(deckStr === 'a', presetIndex);
@@ -998,6 +1023,7 @@ export function runAction(actionId, value, isNote) {
       mapSelectByValue(action.el, value);
       break;
     case 'strobe3': {
+      if (_rec('el:btn-strobe')) break;
       // Quantize 0-127 into thirds: <43 = off, 43-85 = side, >85 = full.
       const strobeTarget = value < 43 ? 'off' : value <= 85 ? 'side' : 'full';
       if (window._setStrobeState) window._setStrobeState(strobeTarget);
@@ -1005,10 +1031,12 @@ export function runAction(actionId, value, isNote) {
     }
     case 'fxTarget':
       // Beat-FX CH select → which deck ('a'/'b'/'m') the FX section drives.
+      if (_rec(`fx-target:${action.target}`)) break;
       if (value > 0) ddj400FxTarget = action.target;
       break;
     case 'padmode':
       // Pad-mode select → Hot Cue / Beat Loop / Beat Jump / Sampler for a deck.
+      if (_rec(`el:pad-mode-${action.deck}`)) break;
       if (value > 0 && window._setPadMode) window._setPadMode(action.deck, action.mode);
       break;
     default:
@@ -1032,6 +1060,137 @@ export function makeCustomProfile(mappingTable) {
       if (actionId) runAction(actionId, value, false);
     },
   };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// REVERSE LOOKUP:  app control  →  the MIDI control that drives it
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Powers the hover hints in the UI ("this button is CH1 note 11 on your
+// controller"). Built-in profiles are functions rather than tables, so the map
+// is derived by *running* the profile: every channel × every note/CC number is
+// pushed through its handlers in capture mode, and whatever each message tried
+// to touch is recorded. That keeps the hints honest for free — edit a profile
+// and the hints follow, with no second table to forget to update.
+//
+// Keys match what the capture helpers report:
+//   'el:<elementId>'        a DOM control (button, slider, select)
+//   'pad:<deck>:<index>'    a performance pad → loop
+//   'cam:<deck>:<index>'    a camera viewpoint preset
+//   'fx-target:<a|b|m>'     Beat-FX CH select
+// Each value is an array of { channel, type:'note'|'cc', data1 }.
+
+/**
+ * Resolve the app-control key an action-id drives (null if it drives none).
+ * Exported so the keyboard/gamepad hints can key off the same control ids.
+ */
+export function appControlKey(actionId) {
+  const a = APP_ACTIONS[actionId];
+  if (!a) return null;
+  switch (a.kind) {
+    case 'slider': case 'button': case 'selectCycle': case 'selectScrub':
+    case 'jog': case 'jogEnc':
+      return `el:${a.el}`;
+    case 'pad':      return `pad:${a.deck}:${a.index}`;
+    case 'cam':      return `cam:${a.deck}:${a.index}`;
+    case 'strobe3':  return 'el:btn-strobe';
+    case 'padmode':  return `el:pad-mode-${a.deck}`;
+    case 'fxTarget': return `fx-target:${a.target}`;
+    default:         return null;
+  }
+}
+
+function _addBinding(map, key, binding) {
+  if (!key) return;
+  if (!map[key]) map[key] = [];
+  // Same physical control can legitimately appear twice (e.g. a note-on/off
+  // pair); keep the list unique so hints don't repeat themselves.
+  const dup = map[key].some((b) => b.channel === binding.channel
+    && b.type === binding.type && b.data1 === binding.data1);
+  if (!dup) map[key].push(binding);
+}
+
+/**
+ * Build the reverse map for a profile.
+ * @param {string} [name]  Profile name; defaults to the active one.
+ * @returns {Object<string, Array<{channel:number,type:string,data1:number}>>}
+ */
+export function buildProfileMidiMap(name) {
+  const profileName = name || activeProfile;
+  const customs = loadCustomProfiles();
+  const isBuiltin = isBuiltinProfile(profileName);
+  const map = {};
+
+  if (isBuiltin) {
+    const profile = PROFILES[profileName];
+    // Profiles mutate their FX-target state and poke a couple of window hooks;
+    // save/stub both so a sweep can never disturb the running app.
+    const savedFlx = flx4FxTarget;
+    const savedDdj = ddj400FxTarget;
+    const savedCycle = (typeof window !== 'undefined') ? window._cycleTempoRange : undefined;
+    const savedWarn = console.warn;
+    if (typeof window !== 'undefined') {
+      window._cycleTempoRange = (deck) => { _rec(`el:tempo-range-label-${deck}`); };
+    }
+    console.warn = () => {};   // profiles warn about un-MIDI-able Load buttons
+
+    try {
+      for (let channel = 0; channel < 16; channel++) {
+        for (let data1 = 0; data1 < 128; data1++) {
+          for (const type of ['note', 'cc']) {
+            _capture = [];
+            try {
+              // Values chosen to reach every branch: velocity 127 counts as a
+              // press, and CC 100 is off the jog encoders' no-movement centre.
+              if (type === 'note') profile.handleNoteOn(channel, data1, 127);
+              else profile.handleCC(channel, data1, 100);
+            } catch (e) { /* a handler that throws simply maps nothing */ }
+            const hits = _capture;
+            _capture = null;
+            for (const key of hits) _addBinding(map, key, { channel, type, data1 });
+          }
+        }
+      }
+    } finally {
+      _capture = null;
+      flx4FxTarget = savedFlx;
+      ddj400FxTarget = savedDdj;
+      console.warn = savedWarn;
+      if (typeof window !== 'undefined') {
+        if (savedCycle === undefined) delete window._cycleTempoRange;
+        else window._cycleTempoRange = savedCycle;
+      }
+    }
+
+    // The override layer replaces the built-in behaviour for a given message,
+    // so drop what the built-in claimed for it before adding the override.
+    const override = getProfileOverride(profileName);
+    for (const [msgKey, actionId] of Object.entries(override)) {
+      const [type, chStr, d1Str] = msgKey.split(':');
+      const channel = Number(chStr), data1 = Number(d1Str);
+      for (const key of Object.keys(map)) {
+        map[key] = map[key].filter((b) => !(b.channel === channel && b.type === type && b.data1 === data1));
+        if (!map[key].length) delete map[key];
+      }
+      _addBinding(map, appControlKey(actionId), { channel, type, data1 });
+    }
+    return map;
+  }
+
+  // Custom profiles are already tables — just invert them.
+  const table = customs[profileName] || {};
+  for (const [msgKey, actionId] of Object.entries(table)) {
+    const [type, chStr, d1Str] = msgKey.split(':');
+    _addBinding(map, appControlKey(actionId), { channel: Number(chStr), type, data1: Number(d1Str) });
+  }
+  return map;
+}
+
+/** Human-readable label for one binding, e.g. "CH1 · Note 11 (0x0B)". */
+export function formatBinding(b) {
+  const kind = b.type === 'cc' ? 'CC' : 'Note';
+  const hex = b.data1.toString(16).toUpperCase().padStart(2, '0');
+  return `CH${b.channel + 1} · ${kind} ${b.data1} (0x${hex})`;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1184,10 +1343,20 @@ let activeProfileObj = PROFILES['ddj-flx4'];
  *                       'nanokontrol2' | 'djc-diy') or a saved custom profile name.
  */
 export function setMidiProfile(name) {
+  // Anything that changes the bindings (dropdown, auto-detect, override apply,
+  // factory reset, custom-profile save) re-activates the profile through here,
+  // so this is the one place the UI has to watch to keep its hover hints fresh.
+  const announce = () => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('midi-profile-changed', { detail: { profile: name } }));
+    }
+  };
+
   if (PROFILES[name]) {
     activeProfile = name;
     activeProfileObj = PROFILES[name];
     console.log(`[MIDI] Profile switched to built-in: ${name}`);
+    announce();
     return;
   }
 
@@ -1196,6 +1365,7 @@ export function setMidiProfile(name) {
     activeProfile = name;
     activeProfileObj = makeCustomProfile(customs[name]);
     console.log(`[MIDI] Profile switched to custom: ${name}`);
+    announce();
     return;
   }
 

@@ -8,7 +8,7 @@ import { sliceScene } from './cutup/slice.js';
 import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres, chunkIdForPoint } from './cutup/xyz_shuffle.js';
-import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff } from './midi.js';
+import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff, buildProfileMidiMap, formatBinding, appControlKey } from './midi.js';
 import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
 import { initKeyboard, setKeyboardLearn, setKeyboardBinding, clearKeyboardBinding, getKeyboardBindingLabel, getKeyboardBindings } from './keyboard.js';
 // Test hook: lets the smoke test push a raw MIDI message through the real dispatcher.
@@ -2720,6 +2720,147 @@ window.addEventListener('midi-profile-autodetected', (e) => {
     sel.value = profile;
   }
 });
+
+// ── MIDI hover hints ──────────────────────────────────────────────────────────
+//
+// Hovering any on-screen control shows which control on the connected hardware
+// drives it, per the ACTIVE profile (overrides included). The map is derived
+// from the profile itself in midi.js, so it always matches what the dispatcher
+// will actually do — including after a MIDI MAP edit.
+// The same hint also reports the keyboard key and gamepad button bound to that
+// control, so one hover answers "how do I reach this without the mouse?" for
+// every input device at once.
+let midiHintMap = {};
+
+/** Re-derive the MIDI map. A few ms; only runs on profile/binding change. */
+function refreshMidiHintMap() {
+  try {
+    midiHintMap = buildProfileMidiMap();
+  } catch (err) {
+    console.warn('[MIDI] Could not build hover-hint map:', err);
+    midiHintMap = {};
+  }
+}
+window._midiHintMap = () => midiHintMap; // test hook
+
+// control key → the action-ids that drive it. Static (APP_ACTIONS never changes),
+// so the keyboard/gamepad labels can be looked up live on hover instead of being
+// cached — they then can't go stale after a re-bind in the MIDI MAP wizard.
+const actionIdsByControl = (() => {
+  const out = {};
+  for (const actionId of Object.keys(APP_ACTIONS)) {
+    const key = appControlKey(actionId);
+    if (!key) continue;
+    (out[key] ||= []).push(actionId);
+  }
+  return out;
+})();
+
+/** Keyboard + gamepad labels bound to one control key, in display order. */
+function deviceHintsFor(key) {
+  const out = [];
+  for (const actionId of actionIdsByControl[key] || []) {
+    const kb = getKeyboardBindingLabel(actionId);
+    const gp = getGamepadBindingLabel(actionId);
+    if (kb) out.push(kb);
+    if (gp) out.push(gp);
+  }
+  return [...new Set(out)];
+}
+
+const midiHintEl = document.createElement('div');
+midiHintEl.id = 'midi-hint';
+midiHintEl.style.cssText = [
+  'position:fixed', 'z-index:99999', 'pointer-events:none', 'display:none',
+  'background:#0b0b12', 'border:1px solid #7c3aed', 'border-radius:4px',
+  'padding:3px 7px', 'color:#dcdce6', 'font-family:inherit', 'font-size:10px',
+  'letter-spacing:0.5px', 'white-space:nowrap', 'box-shadow:0 2px 10px rgba(0,0,0,0.6)',
+].join(';');
+document.body.appendChild(midiHintEl);
+
+/**
+ * Which hint key does this element carry?
+ * Plain controls answer by id; the pad grid answers by its data-pad index, and
+ * carries two bindings (the physical pad → loop, and the shifted pad → camera).
+ */
+function hintKeysFor(el) {
+  const pad = el.closest?.('.pad-btn');
+  if (pad) {
+    const grid = pad.closest('[id^="pads-"]');
+    const deck = grid?.id?.replace('pads-', '');
+    const index = pad.dataset?.pad;
+    if (deck && index != null) return [`pad:${deck}:${index}`, `cam:${deck}:${index}`];
+  }
+  const withId = el.closest?.('[id]');
+  return withId?.id ? [`el:${withId.id}`] : [];
+}
+
+const HINT_KEY_LABEL = { pad: 'Loop pad', cam: 'Camera preset' };
+
+function showMidiHint(el, x, y) {
+  const keys = hintKeysFor(el);
+  const lines = [];
+  for (const key of keys) {
+    const label = keys.length > 1 ? `${HINT_KEY_LABEL[key.split(':')[0]] || ''}: ` : '';
+    const bindings = midiHintMap[key];
+    if (bindings?.length) {
+      lines.push(`🎛 ${label}${bindings.map(formatBinding).join('  /  ')}`);
+    }
+    // Keyboard/gamepad labels already carry their own ⌨ / 🎮 marker.
+    for (const hint of deviceHintsFor(key)) lines.push(label + hint);
+  }
+  if (!lines.length) { hideMidiHint(); return; }
+
+  midiHintEl.innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
+  midiHintEl.style.display = 'block';
+  positionMidiHint(x, y);
+}
+
+/** Park the hint near the cursor, flipping sides so it never leaves the window. */
+function positionMidiHint(x, y) {
+  const r = midiHintEl.getBoundingClientRect();
+  const left = (x + 14 + r.width > window.innerWidth) ? Math.max(4, x - 14 - r.width) : x + 14;
+  const top = (y + 20 + r.height > window.innerHeight) ? Math.max(4, y - 10 - r.height) : y + 20;
+  midiHintEl.style.left = `${left}px`;
+  midiHintEl.style.top = `${top}px`;
+}
+
+function hideMidiHint() {
+  midiHintEl.style.display = 'none';
+}
+
+// Hover wiring. The hint is only rebuilt when the pointer moves onto a
+// different control — mousemove fires far too often to re-render on each one —
+// and it stays hidden for the whole of a drag so it can't sit on top of the
+// fader or jog wheel the user is working.
+let hintLastEl = null;
+let hintDragging = false;
+
+document.addEventListener('mousemove', (e) => {
+  if (hintDragging) return;
+  const target = e.target;
+  if (!(target instanceof Element)) { hintLastEl = null; return hideMidiHint(); }
+  if (target !== hintLastEl) {
+    hintLastEl = target;
+    showMidiHint(target, e.clientX, e.clientY);
+  } else if (midiHintEl.style.display !== 'none') {
+    positionMidiHint(e.clientX, e.clientY);
+  }
+});
+document.addEventListener('mouseleave', () => { hintLastEl = null; hideMidiHint(); });
+// A click means the control is doing its job — get the hint out of the way.
+document.addEventListener('mousedown', () => { hintDragging = true; hideMidiHint(); });
+document.addEventListener('mouseup', () => { hintDragging = false; hintLastEl = null; });
+
+window.addEventListener('midi-profile-changed', () => {
+  refreshMidiHintMap();
+  // Drop the "same element as last move" cache, or a hint left open across a
+  // profile switch would keep showing the old controller's numbers until the
+  // pointer moved to a different control entirely.
+  hintLastEl = null;
+  hideMidiHint();
+});
+refreshMidiHintMap();
 
 // ── Controller LED feedback ───────────────────────────────────────────────────
 // Mirror deck state to the DDJ LEDs so the operator can see what's playing /

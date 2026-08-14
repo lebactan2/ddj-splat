@@ -134,6 +134,24 @@ stay on-screen. Every button, pot and encoder on the board is already mapped, so
 re-mapping with **MIDI MAP** trades one function for another rather than filling
 a gap. There is no MIDI output on this controller, so no LED feedback.
 
+## Hover hints
+
+Hover any on-screen control and a small panel names the hardware that drives it:
+the MIDI message under the active profile, the keyboard key, and the gamepad
+button. Nothing appears for a control the current profile doesn't reach.
+
+```
+🎛 CH1 · Note 11 (0x0B)
+⌨ Q (default)
+🎮 Btn 0 (default)
+```
+
+The MIDI half is derived from the profile itself — every channel/note/CC is run
+through its handlers with the DOM writes swapped for a recorder — so the hints
+cannot drift from what the dispatcher actually does. Switch profiles or edit a
+binding in **MIDI MAP** and they update immediately. Pads show both of their
+roles (physical pad → loop, shifted pad → camera preset) labelled separately.
+
 ## Features
 - Multi-deck Gaussian-splat mixing with an equal-power crossfader
 - Beat-synced FX (roll, spiral, reverb, filter, flanger, phaser, trans, …)
@@ -141,7 +159,8 @@ a gap. There is no MIDI output on this controller, so no LED feedback.
 - HDRI environments + (optional) Google Map background
 - Adaptive resolution scaling for FPS under heavy zoom/overdraw
 - Web MIDI: built-in DDJ-400 / DDJ-FLX4 / DDJ-200 / iCON iDJ / KORG
-  nanoKONTROL2 / DJC-DIY profiles + a
+  nanoKONTROL2 / DJC-DIY profiles, hover hints showing each control's MIDI /
+  keyboard / gamepad binding, + a
   **Guided Map** wizard to map and save a custom profile for *any* controller
 - Second-screen output (mirrors the render to a fullscreen window)
 
