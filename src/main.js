@@ -1391,21 +1391,29 @@ appDiv.innerHTML = `
       <div id="status" style="color:#10b981; font-family:monospace; font-size:11px; font-weight:bold; max-width:180px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">Ready</div>
     </div>
     
-    <button id="btn-layout-toggle" class="util-btn" style="background:#10b981; margin:0;">LAYOUT: 2 DECKS</button>
-    
-    <div class="flex-row" style="gap:16px;">
-      <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-        <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG
-      </label>
-      <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;" title="Render loaded 3D models as solid lit geometry. Uncheck to convert them to gaussian splats instead (cut-up FX apply to splats only).">
-        <input type="checkbox" id="chk-solid-mesh" checked> SOLID MESH
-      </label>
-      <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
-        <input type="checkbox" id="chk-use-colab"> COLAB
-      </label>
-      <input type="text" id="colab-url" placeholder="loca.lt URL..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:100px; box-sizing:border-box;">
+    <!-- Setup-time controls live behind ADVANCED so the header stays a
+         performance surface. Ids are unchanged: everything still binds and
+         behaves exactly as it did inline. -->
+    <div style="position:relative;">
+      <button id="btn-advanced" class="util-btn" style="margin:0;">ADVANCED ▾</button>
+      <div id="advanced-menu" style="display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:99998; background:#0d0d12; border:1px solid #7c3aed; border-radius:6px; padding:10px; box-shadow:0 6px 20px rgba(0,0,0,0.7); min-width:190px;">
+        <button id="btn-layout-toggle" class="util-btn" style="background:#10b981; margin:0 0 8px; width:100%;">LAYOUT: 2 DECKS</button>
+
+        <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:6px; cursor:pointer; padding:3px 0;">
+          <input type="checkbox" id="chk-remove-bg" checked> REMOVE BG
+        </label>
+        <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:6px; cursor:pointer; padding:3px 0;" title="Render loaded 3D models as solid lit geometry. Uncheck to convert them to gaussian splats instead (cut-up FX apply to splats only).">
+          <input type="checkbox" id="chk-solid-mesh" checked> SOLID MESH
+        </label>
+        <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:6px; cursor:pointer; padding:3px 0;">
+          <input type="checkbox" id="chk-use-colab"> COLAB
+        </label>
+        <input type="text" id="colab-url" placeholder="loca.lt URL..." style="background:#000; color:#fff; border:1px solid #333; font-size:10px; padding:4px; width:100%; margin:4px 0 8px; box-sizing:border-box;">
+
+        <button id="btn-export" class="util-btn" style="margin:0; width:100%;">EXPORT</button>
+      </div>
     </div>
-    
+
     <div class="flex-row" style="gap:10px; margin-left:auto;">
       <div class="flex-row" style="align-items:center; gap:4px;">
         <span class="knob-label" style="margin-right:4px;">MIDI</span>
@@ -1425,7 +1433,6 @@ appDiv.innerHTML = `
     <div class="flex-row" style="gap:8px; border-left:1px solid rgba(255,255,255,0.1); padding-left:16px;">
       <button id="btn-reset-orient" class="util-btn">RESET VIEW</button>
       <button id="btn-reset" class="util-btn">RESET</button>
-      <button id="btn-export" class="util-btn">EXPORT</button>
       <button id="btn-output" class="util-btn">OUTPUT →</button>
       <button id="btn-collapse" class="util-btn" style="background:#333;">HIDE UI</button>
     </div>
@@ -2242,7 +2249,18 @@ function resizeViewer() {
 }
 window.addEventListener('resize', resizeViewer);
 
+/** True while the user is typing into a field — hotkeys must stand down then. */
+function typingInField(e) {
+  const t = e.target;
+  if (!t) return false;
+  return t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+    || t.isContentEditable;
+}
+
 window.addEventListener('keydown', (e) => {
+  // Without this guard, typing an 'h' into any field (the Colab URL, the seed,
+  // a BPM display) fired RESET VIEW instead of entering the character.
+  if (typingInField(e)) return;
   if (e.key.toLowerCase() === 'h') {
     // Reset Master Vol to default, then do a FULL view reset — re-centers/fits
     // every per-deck camera (not just viewer.camera), same as RESET VIEW.
@@ -2720,6 +2738,41 @@ window.addEventListener('midi-profile-autodetected', (e) => {
     sel.value = profile;
   }
 });
+
+// ── ADVANCED menu ─────────────────────────────────────────────────────────────
+// Deck layout, background removal, solid-mesh, the Colab pair and EXPORT are all
+// set-up-time controls, so they sit in a dropdown instead of the header strip.
+// Everything inside keeps its original id and handlers — only the DOM position
+// changed.
+(() => {
+  const btn = document.getElementById('btn-advanced');
+  const menu = document.getElementById('advanced-menu');
+  if (!btn || !menu) return;
+
+  const isOpen = () => menu.style.display !== 'none';
+  const setOpen = (open) => {
+    menu.style.display = open ? 'block' : 'none';
+    btn.textContent = open ? 'ADVANCED ▴' : 'ADVANCED ▾';
+    btn.style.background = open ? '#7c3aed' : '';
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!isOpen());
+  });
+
+  // Clicks inside must not close it — the checkboxes and the URL field are used
+  // in sequence — but anything outside should put it away.
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => { if (isOpen()) setOpen(false); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isOpen()) setOpen(false);
+  });
+
+  // EXPORT closes on its way out: it downloads a file, so leaving the menu open
+  // over the decks serves no purpose.
+  document.getElementById('btn-export')?.addEventListener('click', () => setOpen(false));
+})();
 
 // ── MIDI hover hints ──────────────────────────────────────────────────────────
 //

@@ -134,6 +134,14 @@ stay on-screen. Every button, pot and encoder on the board is already mapped, so
 re-mapping with **MIDI MAP** trades one function for another rather than filling
 a gap. There is no MIDI output on this controller, so no LED feedback.
 
+## ADVANCED menu
+
+Set-up-time controls — deck layout (2 / 4 decks), REMOVE BG, SOLID MESH, COLAB
+with its `loca.lt` URL field, and EXPORT — sit in the **ADVANCED** dropdown in
+the header instead of the top strip, so the strip stays a performance surface.
+Click to open; it closes on an outside click or Escape, and stays open while you
+work through the checkboxes and the URL field.
+
 ## Hover hints
 
 Hover any on-screen control and a small panel names the hardware that drives it:

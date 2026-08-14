@@ -63,9 +63,13 @@ body, html {
   pointer-events: none;
 }
 
+/* 2-deck mode: the bottom half of each side is empty (that's where decks C/D go
+   in 4-deck mode), so the deck panel runs the full height of the window. It used
+   to stop at 50% regardless, which clipped the bottom row of pads on anything
+   shorter than ~750px. layout-4deck below puts the 50% height back. */
 .panel-left {
-  top: 16px; left: 16px;
-  width: var(--deck-w); height: calc(50% - 24px);
+  top: 16px; bottom: 16px; left: 16px;
+  width: var(--deck-w); height: auto;
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -75,8 +79,8 @@ body, html {
 }
 
 .panel-right {
-  top: 16px; right: 16px;
-  width: var(--deck-w); height: calc(50% - 24px);
+  top: 16px; bottom: 16px; right: 16px;
+  width: var(--deck-w); height: auto;
   border-radius: 16px;
   flex-direction: column;
   padding: 8px;
@@ -408,29 +412,42 @@ body.layout-4deck .pads-grid {
 
 /* ── Adaptive sizing for shorter desktops / laptops ───────
    Decks stack two-high in 4-deck mode, so vertical space is the
-   tight axis. Shrink the largest controls as the viewport shortens
-   so all four decks keep fitting without scrolling. */
+   tight axis there. Shrink the largest controls as the viewport shortens
+   so all four decks keep fitting without scrolling.
+
+   Scoped to 4-deck: a 2-deck panel now runs the full window height, so it
+   has room for full-size jogs, knobs and pads even on a short laptop —
+   shrinking them there only wasted the space. */
 @media (max-height: 900px) {
-  .jog-wheel { width: 76px; height: 76px; }
-  .jog-inner { width: 50px; height: 50px; }
-  .knob { width: 46px; height: 46px; }
-  .knob-small { width: 31px; height: 31px; }
-  .pad-btn { height: 32px; }
+  body.layout-4deck .jog-wheel { width: 76px; height: 76px; }
+  body.layout-4deck .jog-inner { width: 50px; height: 50px; }
+  body.layout-4deck .knob { width: 46px; height: 46px; }
+  body.layout-4deck .knob-small { width: 31px; height: 31px; }
+  body.layout-4deck .pad-btn { height: 32px; }
 }
 @media (max-height: 800px) {
-  .jog-wheel { width: 58px; height: 58px; }
-  .jog-inner { width: 38px; height: 38px; }
-  .jog-needle { height: 8px; }
-  .knob { width: 38px; height: 38px; }
-  .knob-small { width: 27px; height: 27px; }
-  .huge-round-btn { width: 26px; height: 26px; font-size: 9px; }
-  .pad-btn { height: 24px; font-size: 9px; }
-  .pads-grid { gap: 3px; }
-  .fader-wrapper, .tempo-wrapper { height: 52px !important; }
-  .ch-fader, .tempo-slider { top: 52px; width: 52px; }
-  .section-box { padding: 2px 5px; }
-  .panel-left, .panel-right,
-  .panel-bottom-left, .panel-bottom-right { gap: 2px; padding: 6px; }
+  body.layout-4deck .jog-wheel { width: 58px; height: 58px; }
+  body.layout-4deck .jog-inner { width: 38px; height: 38px; }
+  body.layout-4deck .jog-needle { height: 8px; }
+  body.layout-4deck .knob { width: 38px; height: 38px; }
+  body.layout-4deck .knob-small { width: 27px; height: 27px; }
+  body.layout-4deck .huge-round-btn { width: 26px; height: 26px; font-size: 9px; }
+  body.layout-4deck .pad-btn { height: 24px; font-size: 9px; }
+  body.layout-4deck .pads-grid { gap: 3px; }
+  body.layout-4deck .fader-wrapper,
+  body.layout-4deck .tempo-wrapper { height: 52px !important; }
+  body.layout-4deck .ch-fader,
+  body.layout-4deck .tempo-slider { top: 52px; width: 52px; }
+  body.layout-4deck .section-box { padding: 2px 5px; }
+  body.layout-4deck .panel-left, body.layout-4deck .panel-right,
+  body.layout-4deck .panel-bottom-left,
+  body.layout-4deck .panel-bottom-right { gap: 2px; padding: 6px; }
+}
+/* 2-deck on a short window: only the jog needs trimming to keep the pads
+   clear of the bottom edge — everything else stays full size. */
+@media (max-height: 700px) {
+  body:not(.layout-4deck) .jog-wheel { width: 76px; height: 76px; }
+  body:not(.layout-4deck) .jog-inner { width: 50px; height: 50px; }
 }
 /* Last-resort safety: if content still can't fit (very small screens),
    allow the deck panels to scroll instead of clipping. */
