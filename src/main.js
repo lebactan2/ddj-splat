@@ -9,6 +9,7 @@ import { shuffleChunksInScene } from './cutup/shuffle.js';
 import { swapChunksBetweenScenes } from './cutup/swap.js';
 import { sliceIntoSpheres, chunkIdForPoint } from './cutup/xyz_shuffle.js';
 import { HydraShader, HYDRA_PARAMS, hydraUniformName } from './fx/hydra.js';
+import { audio, startMic, startDesktop, startFile, stopAudio, updateAudio, autoVjModulation, AUTO_ROUTING } from './audio.js';
 import { initMIDI, setMidiProfile, setMidiLearn, APP_ACTIONS, saveCustomProfile, loadCustomProfiles, deleteCustomProfile, listCustomProfiles, _simulateMIDIMessage, isBuiltinProfile, mergeProfileOverride, clearProfileOverride, getProfileOverride, lockAutoDetect, setLed, setPadLed, flashLed, allLedsOff, buildProfileMidiMap, formatBinding, appControlKey } from './midi.js';
 import { initGamepad, setGamepadLearn, setGamepadBinding, clearGamepadBinding, getGamepadBindingLabel, getGamepadBindings } from './gamepad.js';
 import { initKeyboard, setKeyboardLearn, setKeyboardBinding, clearKeyboardBinding, getKeyboardBindingLabel, getKeyboardBindings } from './keyboard.js';
@@ -82,6 +83,8 @@ let lensflareLight = null;
 // Held here rather than read off the DOM so the values survive a viewer rebuild,
 // which throws the composer (and the pass) away and makes a new one.
 const hydraAmounts = Object.fromEntries(HYDRA_PARAMS.map((p) => [p.name, 0]));
+// Per-frame audio-reactive amounts added on top of the knobs (see audio.js).
+let hydraAudioMod = {};
 
 // WebGL screen-space strobe overlay (rendered between HDRI background and splats).
 // Built lazily in setupPostProcessingAndLensFlare; driven by uniforms in performRealtimeUpdate.
@@ -1401,11 +1404,38 @@ appDiv.innerHTML = `
     <!-- Setup-time controls live behind ADVANCED so the header stays a
          performance surface. Ids are unchanged: everything still binds and
          behaves exactly as it did inline. -->
-    <div style="position:relative;">
+    <div style="position:relative; display:flex; align-items:center; gap:6px;">
       <button id="btn-advanced" class="util-btn" style="margin:0;">ADVANCED ▾</button>
+      <button id="btn-audio" class="util-btn" style="margin:0;">AUDIO ▾</button>
       <!-- position:fixed, placed by JS: the header scrolls horizontally
            (overflow-x on .panel-top), which would clip an absolutely
            positioned child to the bar. -->
+      <div id="audio-panel" style="display:none; position:fixed; top:0; left:0; z-index:99998; background:#0d0d12; border:1px solid #10b981; border-radius:6px; padding:10px; box-shadow:0 6px 20px rgba(0,0,0,0.7); width:250px;">
+        <div style="font-size:9px; color:#666; letter-spacing:1.5px; margin-bottom:6px;">SOURCE</div>
+        <div class="flex-row" style="gap:4px; margin-bottom:8px;">
+          <button id="audio-src-mic" class="util-btn" style="flex:1; font-size:9px; padding:4px;">MIC</button>
+          <button id="audio-src-tab" class="util-btn" style="flex:1; font-size:9px; padding:4px;">TAB</button>
+          <button id="audio-src-file" class="util-btn" style="flex:1; font-size:9px; padding:4px;">FILE</button>
+          <button id="audio-src-off" class="util-btn" style="flex:1; font-size:9px; padding:4px;">OFF</button>
+        </div>
+        <input id="audio-file-input" type="file" accept="audio/*" style="display:none;" />
+        <canvas id="audio-spectrum" width="228" height="52" style="width:100%; height:52px; background:#000; border:1px solid #222; border-radius:4px; display:block;"></canvas>
+        <div class="flex-row" style="gap:6px; margin:6px 0; font-family:'Share Tech Mono',monospace; font-size:9px;">
+          <span style="color:#3b82f6;">LOW <span id="audio-low">0</span></span>
+          <span style="color:#10b981;">MID <span id="audio-mid">0</span></span>
+          <span style="color:#f97316;">HIGH <span id="audio-high">0</span></span>
+        </div>
+        <label style="font-size:10px; font-weight:bold; color:#888; display:flex; align-items:center; gap:6px; cursor:pointer; padding:3px 0;"
+               title="Let the bands drive the hydra bank: kick warps the frame, the mix pushes hue, hats add pixel shimmer.">
+          <input type="checkbox" id="chk-auto-vj" checked> AUTO VJ
+        </label>
+        <div class="flex-row" style="gap:6px; align-items:center;">
+          <span class="knob-label">DEPTH</span>
+          <input type="range" min="0" max="100" value="60" class="knob knob-small" id="audio-depth">
+        </div>
+        <div id="audio-status" style="font-size:9px; color:#666; margin-top:6px; min-height:12px;">off</div>
+      </div>
+
       <div id="advanced-menu" style="display:none; position:fixed; top:0; left:0; z-index:99998; background:#0d0d12; border:1px solid #7c3aed; border-radius:6px; padding:10px; box-shadow:0 6px 20px rgba(0,0,0,0.7); min-width:190px;">
         <button id="btn-layout-toggle" class="util-btn" style="background:#10b981; margin:0 0 8px; width:100%;">LAYOUT: 2 DECKS</button>
 
@@ -2770,12 +2800,17 @@ function updateHydraAspect(w, h) {
   hydraPass.uniforms.uAspect.value = (w || 1) / Math.max(1, h || 1);
 }
 
-/** Push the cached amounts into the pass and enable/disable it accordingly. */
+/**
+ * Push knob values + the auto-VJ modulation into the pass and enable/disable it.
+ * The audio layer is ADDED to the knobs rather than replacing them, so the bank
+ * stays playable by hand while a track rides on top; with AUTO off or DEPTH at
+ * zero the uniforms are exactly the knob values.
+ */
 function syncHydraPassFromKnobs() {
   if (!hydraPass) return;
   let any = false;
   for (const p of HYDRA_PARAMS) {
-    const amount = hydraAmounts[p.name] || 0;
+    const amount = Math.min(1, (hydraAmounts[p.name] || 0) + (hydraAudioMod[p.name] || 0));
     const u = hydraPass.uniforms[hydraUniformName(p.name)];
     if (u) u.value = amount;
     if (amount > 0.005) any = true;
@@ -2800,6 +2835,141 @@ for (const p of HYDRA_PARAMS) {
     updateKnobFill(el);
     setHydraAmount(p.name, Number(el.value) / 100);
   });
+}
+
+// ── AUDIO / auto-VJ panel ─────────────────────────────────────────────────────
+// FFT of whatever is playing (mic, a tab's audio, or a file), with its three
+// bands driving the hydra bank — the app VJs itself to the track. The analysis
+// and the routing live in src/audio.js; this is the panel and the frame hook.
+let autoVjEnabled = true;
+let autoVjDepth = 0.6;
+let audioPanelOpen = false;
+
+window._audioState = () => ({                 // test hook
+  on: audio.on, source: audio.source, error: audio.error,
+  low: audio.low, mid: audio.mid, high: audio.high, level: audio.level,
+  auto: autoVjEnabled, depth: autoVjDepth, mod: { ...hydraAudioMod },
+});
+window._setAutoVj = (on, depth) => {          // test hook
+  autoVjEnabled = !!on;
+  if (Number.isFinite(depth)) autoVjDepth = Math.max(0, Math.min(1, depth));
+};
+
+(() => {
+  const btn = document.getElementById('btn-audio');
+  const panel = document.getElementById('audio-panel');
+  if (!btn || !panel) return;
+  document.body.appendChild(panel);           // same reason as the ADVANCED panel
+
+  const statusEl2 = document.getElementById('audio-status');
+  const setStatus = (msg, colour = '#666') => {
+    if (statusEl2) { statusEl2.textContent = msg; statusEl2.style.color = colour; }
+  };
+
+  const place = () => {
+    const b = btn.getBoundingClientRect();
+    panel.style.left = '0px'; panel.style.top = '0px';
+    const m = panel.getBoundingClientRect();
+    panel.style.left = `${Math.round(Math.max(6, Math.min(b.left, window.innerWidth - m.width - 6)))}px`;
+    panel.style.top = `${Math.round(b.bottom + 6 + m.height > window.innerHeight
+      ? Math.max(6, b.top - 6 - m.height) : b.bottom + 6)}px`;
+  };
+  const setOpen = (open) => {
+    audioPanelOpen = open;
+    panel.style.display = open ? 'block' : 'none';
+    if (open) place();
+    btn.textContent = open ? 'AUDIO ▴' : 'AUDIO ▾';
+  };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); setOpen(!audioPanelOpen); });
+  panel.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => { if (audioPanelOpen) setOpen(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && audioPanelOpen) setOpen(false); });
+  window.addEventListener('resize', () => { if (audioPanelOpen) place(); });
+
+  const reflectSource = () => {
+    for (const [id, src] of [['audio-src-mic', 'mic'], ['audio-src-tab', 'desktop'], ['audio-src-file', 'file']]) {
+      document.getElementById(id)?.classList.toggle('active', audio.on && audio.source === src);
+    }
+    if (audio.error) setStatus(audio.error, '#f97316');
+    else setStatus(audio.on ? `analysing ${audio.source}` : 'off', audio.on ? '#10b981' : '#666');
+    // The analysis is driven from the animation loop, so a live source has to
+    // start it (and releasing the source lets it stop again).
+    if (audio.on) startAnimationLoop();
+    else stopAnimationLoop();
+  };
+
+  document.getElementById('audio-src-mic')?.addEventListener('click', async () => {
+    setStatus('asking for the mic…'); await startMic(); reflectSource();
+  });
+  document.getElementById('audio-src-tab')?.addEventListener('click', async () => {
+    setStatus('pick a tab and tick "share audio"…'); await startDesktop(); reflectSource();
+  });
+  const fileInput = document.getElementById('audio-file-input');
+  document.getElementById('audio-src-file')?.addEventListener('click', () => fileInput?.click());
+  fileInput?.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0];
+    if (f) { setStatus(`loading ${f.name}…`); await startFile(f); reflectSource(); }
+  });
+  document.getElementById('audio-src-off')?.addEventListener('click', () => {
+    stopAudio(); hydraAudioMod = {}; syncHydraPassFromKnobs(); reflectSource();
+  });
+
+  document.getElementById('chk-auto-vj')?.addEventListener('change', (e) => {
+    autoVjEnabled = e.target.checked;
+    if (!autoVjEnabled) { hydraAudioMod = {}; syncHydraPassFromKnobs(); }
+  });
+  const depthEl = document.getElementById('audio-depth');
+  depthEl?.addEventListener('input', () => {
+    updateKnobFill(depthEl);
+    autoVjDepth = Number(depthEl.value) / 100;
+  });
+
+  // Spectrum readout, drawn only while the panel is open.
+  const canvas = document.getElementById('audio-spectrum');
+  const g = canvas?.getContext('2d');
+  window._drawAudioReadout = () => {
+    if (!audioPanelOpen || !g) return;
+    const w = canvas.width, h = canvas.height;
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = '#000'; g.fillRect(0, 0, w, h);
+    if (audio.spectrum) {
+      // Log-ish x mapping: most of the interesting content is under 4kHz, and a
+      // linear plot of 1024 bins buries it in the left eighth of the canvas.
+      const bins = audio.spectrum.length;
+      for (let x = 0; x < w; x++) {
+        const t = x / w;
+        const bin = Math.min(bins - 1, Math.floor(Math.pow(t, 2.2) * bins));
+        const v = audio.spectrum[bin] / 255;
+        const bh = Math.max(1, v * h);
+        g.fillStyle = t < 0.18 ? '#3b82f6' : t < 0.55 ? '#10b981' : '#f97316';
+        g.fillRect(x, h - bh, 1, bh);
+      }
+    }
+    const fmt = (v) => v.toFixed(2);
+    const lo = document.getElementById('audio-low');
+    const mi = document.getElementById('audio-mid');
+    const hi = document.getElementById('audio-high');
+    if (lo) lo.textContent = fmt(audio.low);
+    if (mi) mi.textContent = fmt(audio.mid);
+    if (hi) hi.textContent = fmt(audio.high);
+  };
+  reflectSource();
+})();
+
+/**
+ * One audio frame: analyse, then push the routing into the hydra bank. Called
+ * from the render override, so it runs whether or not a deck is playing.
+ */
+function updateAudioReactive() {
+  if (!audio.on) return;
+  updateAudio();
+
+  const mod = autoVjEnabled ? autoVjModulation(autoVjDepth) : {};
+  const had = Object.keys(hydraAudioMod).length > 0;
+  hydraAudioMod = mod;
+  // Skip the uniform writes when there is nothing to say and nothing to undo.
+  if (had || Object.keys(mod).length) syncHydraPassFromKnobs();
+  if (window._drawAudioReadout) window._drawAudioReadout();
 }
 
 // ── ADVANCED menu ─────────────────────────────────────────────────────────────
@@ -4736,7 +4906,15 @@ function startAnimationLoop() {
     }
     
     let needsUpdate = false;
-    
+
+    // Audio analysis lives here rather than in the render callback: the splat
+    // viewer only calls that when it decides the frame changed, so with every
+    // deck stopped the analyser would be read once and then never again.
+    if (audio.on) {
+      updateAudioReactive();
+      if (autoVjEnabled && autoVjDepth > 0) needsUpdate = true;
+    }
+
     if (isPlayingA || isPlayingB) {
       const speedA = isPlayingA ? (0.005 * (bpmA / 120.0)) : 0;
       const speedB = isPlayingB ? (0.005 * (bpmB / 120.0)) : 0;
@@ -4791,6 +4969,10 @@ function startAnimationLoop() {
 }
 
 function stopAnimationLoop() {
+  // Audio analysis rides on this loop: while a source is live it has to keep
+  // ticking even with every deck stopped, or the bands freeze at their last
+  // reading and the auto-VJ picture stops moving.
+  if (audio.on) return;
   if (!isPlayingA && !isPlayingB && splashFactor <= 1.0 && !strobeEngaged && !camRigSettling &&
       (!fxEngagedA || (fxActiveA !== 'flanger' && fxActiveA !== 'trans')) &&
       (!fxEngagedB || (fxActiveB !== 'flanger' && fxActiveB !== 'trans')) &&

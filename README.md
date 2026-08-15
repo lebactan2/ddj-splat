@@ -134,6 +134,38 @@ stay on-screen. Every button, pot and encoder on the board is already mapped, so
 re-mapping with **MIDI MAP** trades one function for another rather than filling
 a gap. There is no MIDI output on this controller, so no LED feedback.
 
+## AUDIO — FFT and auto VJ
+
+**AUDIO** in the top bar opens the analyser: pick a source, watch the spectrum,
+and let the track drive the visuals.
+
+| Source | What it is |
+| --- | --- |
+| MIC | `getUserMedia` — a monitor mic in the room, or a loopback device (VB-Cable, BlackHole, "Stereo Mix") for the actual mix |
+| TAB | `getDisplayMedia` with audio — a browser tab or the whole system on Chrome. Tick "share audio" in the picker or nothing is captured |
+| FILE | an audio file from disk, played out loud and analysed on the way |
+| OFF | releases the capture |
+
+A 2048-point FFT is split into three bands — low (20-250Hz), mid (250Hz-2kHz),
+high (2-16kHz) — each with an attack/release follower so a kick hits instantly
+and falls away over ~150ms, plus onset detection on the low band that tracks the
+material rather than a fixed threshold.
+
+**AUTO VJ** routes those bands into the hydra bank:
+
+| Band | Drives |
+| --- | --- |
+| low | modulate (frame warp) + a touch of kaleid |
+| mid | colorama (hue push) |
+| high | pixelate shimmer |
+| kick onset | threshold flash |
+
+The routing is **added** to the hydra knobs and clamped, so the bank stays
+playable by hand while the music rides on top — pull DEPTH to zero, or untick
+AUTO VJ, and the knobs are exactly what they were. Analysis runs on the
+animation loop, which stays alive while a source is live, so the picture keeps
+moving with the track even with every deck stopped.
+
 ## Hydra screen FX
 
 A [hydra](https://hydra.ojack.xyz)-flavoured bank of 2D ops on the finished
@@ -198,6 +230,8 @@ roles (physical pad → loop, shifted pad → camera preset) labelled separately
 - Beat-synced FX (roll, spiral, reverb, filter, flanger, phaser, trans, …)
 - Hydra-style screen FX bank on the master bus (kaleid, repeat, scroll,
   modulate, pixelate, colorama, posterize, threshold)
+- Audio FFT (mic / tab / file) with an auto-VJ routing that plays the FX bank
+  off the track's low, mid and high bands
 - WebGL strobe layer rendered between the HDRI environment and the splats
 - HDRI environments + (optional) Google Map background
 - Adaptive resolution scaling for FPS under heavy zoom/overdraw
